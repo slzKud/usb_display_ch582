@@ -10,6 +10,7 @@
  * microcontroller manufactured by Nanjing Qinheng Microelectronics.
  *******************************************************************************/
 
+#include <stdio.h>
 #include "CH58x_common.h"
 #include "printf.h"
 #include "hid/simple_hid.h"
@@ -1017,6 +1018,7 @@ int main()
     DebugInit();        //配置串口1用来prinft来debug
 
     uint8_t id[2]={0x0,0x0};
+    char tempstr[255]="";
     BSP_W25Qx_Read_ID(id);
     
     printf("start,%d\n",1);
@@ -1043,8 +1045,10 @@ int main()
     u8g2_SetPowerSave(&u8g2, 0);  // 打开显示器
     u8g2_ClearBuffer(&u8g2);
     u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
+    sprintf(tempstr,"W25ID:0x%X%X",id[0],id[1]);
     while(1){
-        u8g2_DrawStr(&u8g2, 0, 20, "Hello, u8g2!");
+        u8g2_DrawStr(&u8g2, 0, 12, "Hello, USB Display!");
+        u8g2_DrawStr(&u8g2, 0, 25, tempstr);
         u8g2_SendBuffer(&u8g2);
         DelayMs(1000);
     }

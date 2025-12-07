@@ -4,7 +4,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "CH58x_common.h"
 
-#define CH58X_SPI_REMAP
+//#define CH58X_SPI_REMAP
 
 #ifndef CH58X_SPI_REMAP
 #define SCS_PIN GPIO_Pin_12
