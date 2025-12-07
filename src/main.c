@@ -11,6 +11,7 @@
  *******************************************************************************/
 
 #include <stdio.h>
+#include <string.h>
 #include "CH58x_common.h"
 #include "printf.h"
 #include "hid/simple_hid.h"
@@ -29,7 +30,7 @@
 
 u8g2_t u8g2;
 // 设备描述符
-const uint8_t MyDevDescr[] = {0x12,0x01,0x10,0x01,0x00,0x00,0x00,DevEP0SIZE,0x3d,0x41,0x07,0x21,0x00,0x00,0x01,0x02,0x00,0x01};
+const uint8_t MyDevDescr[] = {0x12,0x01,0x10,0x01,0x00,0x00,0x00,DevEP0SIZE,0x3d,0x41,0x08,0x21,0x00,0x00,0x01,0x02,0x00,0x01};
 const uint8_t U2MyDevDescr[] = {0x12,0x01,0x10,0x01,0x00,0x00,0x00,U2DevEP0SIZE,0x3d,0x41,0x08,0x21,0x00,0x00,0x01,0x02,0x00,0x01};
 // 配置描述符
 const uint8_t MyCfgDescr[] = {
@@ -67,10 +68,13 @@ const uint8_t HIDDescr[] = {  0x06, 0x00,0xff,
 // 语言描述符
 const uint8_t MyLangDescr[] = {0x04, 0x03, 0x09, 0x04};
 // 厂家信息
-const uint8_t MyManuInfo[] = {0x0E, 0x03, 'w', 0, 'c', 0, 'h', 0, '.', 0, 'c', 0, 'n', 0};
+const uint8_t MyManuInfo[] = {0x0E, 0x03, 'S', 0, 'F', 0, 'w', 0, 'o', 0, 'r', 0, 'k', 0};
 // 产品信息
-const uint8_t MyProdInfo[] = {16, 0x03, 'C', 0, 'H', 0, '5', 0, '8', 0, 'x', 0,'-', 0,'1', 0};
+const uint8_t MyProdInfo[] = {18, 0x03, 'U', 0, 'S', 0, 'B', 0, ' ', 0, 'D', 0,'I', 0,'S', 0,'P', 0};
 const uint8_t U2MyProdInfo[] = {16, 0x03, 'C', 0, 'H', 0, '5', 0, '8', 0, 'x', 0,'-', 0,'2', 0};
+// 字符显示缓冲区
+char displayBuffer[255]="";
+uint8_t displayPos[2]={0x0,0x0};
 /**********************************************************/
 uint8_t        DevConfig, Ready = 0;
 uint8_t        SetupReqCode;
@@ -1046,9 +1050,16 @@ int main()
     u8g2_ClearBuffer(&u8g2);
     u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
     sprintf(tempstr,"W25ID:0x%X%X",id[0],id[1]);
+    sprintf(displayBuffer,"FIRST STRING.");
+    displayPos[0]=0;
+    displayPos[1]=37;
     while(1){
+        u8g2_ClearBuffer(&u8g2);
         u8g2_DrawStr(&u8g2, 0, 12, "Hello, USB Display!");
         u8g2_DrawStr(&u8g2, 0, 25, tempstr);
+        if(strlen(displayBuffer)>0){
+            u8g2_DrawStr(&u8g2, displayPos[0], displayPos[1], displayBuffer);
+        }
         u8g2_SendBuffer(&u8g2);
         DelayMs(1000);
     }

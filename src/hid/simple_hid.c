@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "simple_hid.h"
 #include "../w25qxx/w25qxx.h"
@@ -329,6 +330,11 @@ int handle_send_data(uint8_t *data, uint8_t data_length, int port_number, uint8_
         BSP_W25Qx_Read_ID(id);
         data_len=make_recv_data_resp(recv_port_number, id,4, resp_data);
         *resp_data_length = data_len;
+        return PARSE_STATUS_SUCCESS;
+    }
+    if(spi_command==0x1){
+        extern char displayBuffer[];
+        sprintf(displayBuffer,"Second string.");
         return PARSE_STATUS_SUCCESS;
     }
     data_len = make_simple_code_resp(COMMAND_SEND_DATA, 0x2, resp_data);
