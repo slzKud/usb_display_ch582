@@ -17,7 +17,9 @@
 #include "hid/simple_hid.h"
 #include "ch58x_soft_I2C.h"
 #include "ch58x_u8g2.h"
+#include "data_process/data_process.h"
 #include "w25qxx/w25qxx.h"
+#include <stdlib.h>
 // 支持的最大接口数量
 #define USB_INTERFACE_MAX_NUM       1
 // 接口号的最大值，例程只有一个接口，接口号为0
@@ -73,7 +75,7 @@ const uint8_t MyManuInfo[] = {0x0E, 0x03, 'S', 0, 'F', 0, 'w', 0, 'o', 0, 'r', 0
 const uint8_t MyProdInfo[] = {18, 0x03, 'U', 0, 'S', 0, 'B', 0, ' ', 0, 'D', 0,'I', 0,'S', 0,'P', 0};
 const uint8_t U2MyProdInfo[] = {16, 0x03, 'C', 0, 'H', 0, '5', 0, '8', 0, 'x', 0,'-', 0,'2', 0};
 // 字符显示缓冲区
-char displayBuffer[255]="";
+char *displayBuffer;
 uint8_t displayPos[2]={0x0,0x0};
 /**********************************************************/
 uint8_t        DevConfig, Ready = 0;
@@ -1022,6 +1024,7 @@ int main()
     DebugInit();        //配置串口1用来prinft来debug
 
     uint8_t id[2]={0x0,0x0};
+    int x=0;
     char tempstr[255]="";
     BSP_W25Qx_Read_ID(id);
     
@@ -1050,17 +1053,23 @@ int main()
     u8g2_ClearBuffer(&u8g2);
     u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
     sprintf(tempstr,"W25ID:0x%X%X",id[0],id[1]);
-    sprintf(displayBuffer,"FIRST STRING.");
+    displayBuffer=malloc(255*sizeof(char));
+    update_temp(-30.481);
     displayPos[0]=0;
     displayPos[1]=37;
     while(1){
         u8g2_ClearBuffer(&u8g2);
         u8g2_DrawStr(&u8g2, 0, 12, "Hello, USB Display!");
         u8g2_DrawStr(&u8g2, 0, 25, tempstr);
+        u8g2_DrawStr(&u8g2, 0, 48, "CPU: 18% MEM: 77%");
+        u8g2_DrawStr(&u8g2, 0, 61, "U:0.34 KB/s D:0.06 KB/s");
         if(strlen(displayBuffer)>0){
             u8g2_DrawStr(&u8g2, displayPos[0], displayPos[1], displayBuffer);
         }
         u8g2_SendBuffer(&u8g2);
+        refresh_temp_str(displayBuffer);
+        sprintf(tempstr,"W25ID:0x%X%X %d",id[0],id[1],x);
+        x++;
         DelayMs(1000);
     }
 

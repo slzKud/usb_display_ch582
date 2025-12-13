@@ -20,7 +20,9 @@ add_executable(ch58x
 src/main.c
 src/printf.c
 src/hid/simple_hid.c
+src/hid/simple_data_recv.c
 src/w25qxx/w25qxx.c
+src/data_process/data_process.c
 src/ch58x_soft_I2C.c
 #src/ch58x_hard_I2C.c
 src/ch58x_u8g2.c

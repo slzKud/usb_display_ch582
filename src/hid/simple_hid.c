@@ -6,14 +6,15 @@
 #include <stdio.h>
 
 #include "simple_hid.h"
+#include "simple_data_recv.h"
 #include "../w25qxx/w25qxx.h"
+#include "../data_process/data_process.h"
 #include "CH58x_common.h"
 
 uint8_t *recv_data_buffer = NULL;
-
+extern char *displayBuffer;
 uint8_t gpio_sim_level[2] = {0x0, 0x0};
 uint8_t gpio_sim_direction[2] = {0x0, 0x0};
-
 void print_hex(const char *label, const uint8_t *data, size_t length)
 {
     printf("%s: ", label);
@@ -323,26 +324,24 @@ int handle_mcu_opt(uint8_t *data, uint8_t data_length, int port_number, uint8_t 
 int handle_send_data(uint8_t *data, uint8_t data_length, int port_number, uint8_t **resp_data, uint8_t *resp_data_length)
 {
     uint8_t recv_port_number = *(data);
-    uint8_t spi_command = *(data + 1);
-    uint8_t data_len =0;
-    if(spi_command==0x0){
-        uint8_t id[4]={0xFF,0xFF,0xFF,0XFF};
-        BSP_W25Qx_Read_ID(id);
-        data_len=make_recv_data_resp(recv_port_number, id,4, resp_data);
-        *resp_data_length = data_len;
-        return PARSE_STATUS_SUCCESS;
+    uint8_t data_len = 0;
+    int i=0;
+    ParsedData parse_data;
+    if(recv_port_number == 0 || recv_port_number == 1){
+        if(parse_packet((const uint8_t*)(data + 1),data_length - 1,&parse_data)==0){
+            if(parse_data.data_count>0){
+                for(i=0;i<parse_data.data_count;i++){
+                    if(parse_data.data_points[i].type==DATA_TYPE_TEMPERATURE){
+                        update_temp(parse_data.data_points[i].value);
+                    }
+                }
+            }
+        }
     }
-    if(spi_command==0x1){
-        extern char displayBuffer[];
-        sprintf(displayBuffer,"Second string.");
-        return PARSE_STATUS_SUCCESS;
-    }
-    data_len = make_simple_code_resp(COMMAND_SEND_DATA, 0x2, resp_data);
-    *resp_data_length = data_len;
     //print_hex("handle_send_data:port", data, 1);
     //print_hex("handle_send_data:data", data + 1, data_length - 1);
-    //uint8_t data_len = make_simple_code_resp(COMMAND_SEND_DATA, 0x1, resp_data);
-    //*resp_data_length = data_len;
+    data_len = make_simple_code_resp(COMMAND_SEND_DATA, 0x1, resp_data);
+    *resp_data_length = data_len;
     //printf("already set recv_data\n");
     /*
     uint8_t recv_data_len = make_recv_data_resp(recv_port_number, data + 1, data_length - 1, &recv_data_buffer);
