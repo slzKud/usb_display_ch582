@@ -1054,7 +1054,7 @@ int main()
     u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
     sprintf(tempstr,"W25ID:0x%X%X",id[0],id[1]);
     displayBuffer=malloc(255*sizeof(char));
-    update_temp(-30.481);
+    update_temp(-30.48);
     displayPos[0]=0;
     displayPos[1]=37;
     while(1){
