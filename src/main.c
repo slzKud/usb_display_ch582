@@ -19,6 +19,7 @@
 #include "ch58x_u8g2.h"
 #include "data_process/data_process.h"
 #include "w25qxx/w25qxx.h"
+#include "ch58x_fatfs.h"
 #include <stdlib.h>
 // 支持的最大接口数量
 #define USB_INTERFACE_MAX_NUM       1
@@ -1019,16 +1020,23 @@ int main()
     DelayMs(100);
     GPIOPinRemap(ENABLE,RB_PIN_I2C);
     IIC_Init();            //端口初始化
-    CH58X_SPI_INIT_W25Qx();
+    //CH58X_SPI_INIT_W25Qx();
     
     DebugInit();        //配置串口1用来prinft来debug
+    printf("start,%d\n",1);
+    int result = 0;
+    char resultstr[257]="";
+    char result1[32]="";
+    result = fatfs_test();
+    fatfs_test_str(resultstr);
+    sprintf(result1,"fatfs_test:%d",result);
 
     uint8_t id[2]={0x0,0x0};
     int x=0;
     char tempstr[255]="";
     BSP_W25Qx_Read_ID(id);
     
-    printf("start,%d\n",1);
+    
     printf("start,w25id:%x,%x\n",id[0],id[1]);
     //UART1_SendString("start\n", sizeof("start\n"));
     pEP0_RAM_Addr = EP0_Databuf;    //配置缓存区64字节。
@@ -1057,13 +1065,16 @@ int main()
     update_temp(-30.48);
     displayPos[0]=0;
     displayPos[1]=37;
+    /*
     // TODO: SPI FLASH 写入测试
     uint8_t W25Q64_Buffer[4]={0xff,0xff,0xff,0xff};
     uint8_t W25Q64_Buffer_Read[4]={0xff,0xff,0xff,0xff};
     char Wtempstr[32]="";
     char Rtempstr[32]="";
     BSP_W25Qx_Read(W25Q64_Buffer,0,4);
+    */
     while(1){
+        /*
         if(W25Q64_Buffer[0]==0xff)
             W25Q64_Buffer[0]=0;
         if(W25Q64_Buffer[1]==0xff)
@@ -1081,11 +1092,16 @@ int main()
         BSP_W25Qx_Read(W25Q64_Buffer_Read,0,4);
         sprintf(Wtempstr,"W: %02X %02X %02X %02X",W25Q64_Buffer[0],W25Q64_Buffer[1],W25Q64_Buffer[2],W25Q64_Buffer[3]);
         sprintf(Rtempstr,"R: %02X %02X %02X %02X",W25Q64_Buffer_Read[0],W25Q64_Buffer_Read[1],W25Q64_Buffer_Read[2],W25Q64_Buffer_Read[3]);
+        */
         u8g2_ClearBuffer(&u8g2);
         u8g2_DrawStr(&u8g2, 0, 12, "Hello, USB Display!");
         u8g2_DrawStr(&u8g2, 0, 25, tempstr);
+        u8g2_DrawStr(&u8g2, 0, 48, result1);
+        u8g2_DrawStr(&u8g2, 0, 61, resultstr);
+        /*
         u8g2_DrawStr(&u8g2, 0, 48, Wtempstr);
         u8g2_DrawStr(&u8g2, 0, 61, Rtempstr);
+        */
         u8g2_SendBuffer(&u8g2);
         /*
         u8g2_DrawStr(&u8g2, 0, 48, "CPU: 18% MEM: 77%");

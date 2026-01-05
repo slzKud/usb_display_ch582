@@ -26,6 +26,7 @@ src/data_process/data_process.c
 src/ch58x_soft_I2C.c
 #src/ch58x_hard_I2C.c
 src/ch58x_u8g2.c
+src/ch58x_fatfs.c
 src/u8g2/mui.c
 src/u8g2/mui.h
 src/u8g2/mui_u8g2.c
@@ -73,6 +74,10 @@ src/u8g2/u8x8_setup.c
 src/u8g2/u8x8_string.c
 src/u8g2/u8x8_u16toa.c
 src/u8g2/u8x8_u8toa.c
+src/fatfs/diskio.c
+src/fatfs/ff.c
+src/fatfs/ffsystem.c
+src/fatfs/ffunicode.c
 )
 
 target_link_libraries(ch58x OpenWCH58x)

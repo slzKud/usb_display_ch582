@@ -1,6 +1,7 @@
 #include "w25qxx.h"
 #include "../printf.h"
 uint8_t CH58X_SPI_INIT_W25Qx(){
+    printf("CH58X_SPI_INIT_W25Qx\n");
     #ifdef CH58X_SPI_REMAP
     GPIOPinRemap(ENABLE,RB_PIN_SPI0);
     GPIOB_ResetBits(SCS_PIN | SCK_PIN | MOSI_PIN);
@@ -87,7 +88,7 @@ uint8_t BSP_W25Qx_WriteEnable(void)
 
 void BSP_W25Qx_Read_ID(uint8_t *ID)
 {
-    
+    printf("BSP_W25Qx_Read_ID\n");
     uint8_t cmd[4] = {READ_ID_CMD, 0x00, 0x00, 0x00};
 
     W25Qx_Enable();
@@ -118,7 +119,7 @@ void BSP_W25Qx_Read_ID(uint8_t *ID)
 uint8_t BSP_W25Qx_Read(uint8_t *pData, uint32_t ReadAddr, uint32_t Size)
 {
     uint8_t cmd[4];
-
+    printf("BSP_W25Qx_Read:ReadAddr:%x,size:%x\n",ReadAddr,Size);
     /* Configure the command */
     cmd[0] = READ_CMD;
     cmd[1] = (uint8_t)(ReadAddr >> 16);
@@ -139,6 +140,7 @@ uint8_t BSP_W25Qx_Write(uint8_t *pData, uint32_t WriteAddr, uint32_t Size)
 {
     uint8_t cmd[4];
     uint32_t end_addr, current_size, current_addr;
+    printf("BSP_W25Qx_Read:WriteAddr:%x,size:%x\n",WriteAddr,Size);
     uint32_t tickstart = SYS_GetSysTickCnt();
     /* Calculation of the size between the write address and the end of the page */
     current_addr = 0;
