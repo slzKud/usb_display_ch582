@@ -1057,10 +1057,37 @@ int main()
     update_temp(-30.48);
     displayPos[0]=0;
     displayPos[1]=37;
+    // TODO: SPI FLASH 写入测试
+    uint8_t W25Q64_Buffer[4]={0xff,0xff,0xff,0xff};
+    uint8_t W25Q64_Buffer_Read[4]={0xff,0xff,0xff,0xff};
+    char Wtempstr[32]="";
+    char Rtempstr[32]="";
+    BSP_W25Qx_Read(W25Q64_Buffer,0,4);
     while(1){
+        if(W25Q64_Buffer[0]==0xff)
+            W25Q64_Buffer[0]=0;
+        if(W25Q64_Buffer[1]==0xff)
+            W25Q64_Buffer[1]=1;
+        if(W25Q64_Buffer[2]==0xff)
+            W25Q64_Buffer[2]=2;
+        if(W25Q64_Buffer[3]==0xff)
+            W25Q64_Buffer[3]=3;
+        W25Q64_Buffer[0]++;
+        W25Q64_Buffer[1]++;
+        W25Q64_Buffer[2]++;
+        W25Q64_Buffer[3]++;
+        BSP_W25Qx_Erase_Block(0);
+        BSP_W25Qx_Write(W25Q64_Buffer,0,4);
+        BSP_W25Qx_Read(W25Q64_Buffer_Read,0,4);
+        sprintf(Wtempstr,"W: %02X %02X %02X %02X",W25Q64_Buffer[0],W25Q64_Buffer[1],W25Q64_Buffer[2],W25Q64_Buffer[3]);
+        sprintf(Rtempstr,"R: %02X %02X %02X %02X",W25Q64_Buffer_Read[0],W25Q64_Buffer_Read[1],W25Q64_Buffer_Read[2],W25Q64_Buffer_Read[3]);
         u8g2_ClearBuffer(&u8g2);
         u8g2_DrawStr(&u8g2, 0, 12, "Hello, USB Display!");
         u8g2_DrawStr(&u8g2, 0, 25, tempstr);
+        u8g2_DrawStr(&u8g2, 0, 48, Wtempstr);
+        u8g2_DrawStr(&u8g2, 0, 61, Rtempstr);
+        u8g2_SendBuffer(&u8g2);
+        /*
         u8g2_DrawStr(&u8g2, 0, 48, "CPU: 18% MEM: 77%");
         u8g2_DrawStr(&u8g2, 0, 61, "U:0.34 KB/s D:0.06 KB/s");
         if(strlen(displayBuffer)>0){
@@ -1070,6 +1097,7 @@ int main()
         refresh_temp_str(displayBuffer);
         sprintf(tempstr,"W25ID:0x%X%X %d",id[0],id[1],x);
         x++;
+        */
         DelayMs(1000);
     }
 
