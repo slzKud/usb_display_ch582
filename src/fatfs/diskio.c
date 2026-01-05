@@ -95,16 +95,19 @@ DRESULT disk_read (
 {
 	DRESULT res;
 	//int result;
-	int i=count*4096/Q64_BLOCK_SIZE;
+	int wc=count*4096/Q64_BLOCK_SIZE;
+	int i=0;
+	int ret =0;
 	switch (pdrv) {
 	case SD_CARD :
 		break;
 
 	case SPI_FLASH :
 		printf("disk_read,sector:%x,count:%x\n",sector,count);
-		while(i>=0){
+		while(i<wc){
+			
 			BSP_W25Qx_Read(buff+(i*Q64_BLOCK_SIZE),sector*4096+i*Q64_BLOCK_SIZE,Q64_BLOCK_SIZE);
-			i--;
+			i++;
 		}
 		//BSP_W25Qx_Read(buff,sector*4096,count*4096);
 		res = RES_OK;
@@ -131,7 +134,8 @@ DRESULT disk_write (
 {
 	DRESULT res;
 	//int result;
-	int i = count*4096/Q64_BLOCK_SIZE;
+	int wc=count*4096/Q64_BLOCK_SIZE;
+	int i=0;
 	switch (pdrv) {
 	case SD_CARD :
 
@@ -139,13 +143,14 @@ DRESULT disk_write (
 
 	case SPI_FLASH :
 		if(BSP_W25Qx_Erase_Block(sector*4096)==W25Qx_OK){
-			while(i>=0){
+			while(i<wc){
 				if(BSP_W25Qx_Write((uint8_t *)buff+(i*Q64_BLOCK_SIZE),sector*4096+i*Q64_BLOCK_SIZE,Q64_BLOCK_SIZE)==W25Qx_OK){
 					res=RES_OK;
 				}else{
+					printf("failed\n");
 					res=RES_PARERR;
 				}
-				i--;
+				i++;
 			}
 		}else{
 			res=RES_PARERR;

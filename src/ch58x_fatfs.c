@@ -40,18 +40,20 @@ int fatfs_test(){
         res=f_write(&fp,write_buf,sizeof(write_buf),&bw);
         if(res==RES_OK){
             printf("write file ok\n");
-            f_lseek(&fp,0);
-            res = f_read(&fp ,read_buf,f_size(&fp),&br);
-            if(res!=RES_OK){
-                printf("read file error\n");
-                f_close(&fp);
-                f_mount(NULL,  "1:",  1);
-                return 5;
-            }
-            printf("read file ok,file:%s\n",read_buf);
+        }else{
+            printf("write file failed,%d\n",res);
+        }
+        f_lseek(&fp,0);
+        res = f_read(&fp ,read_buf,f_size(&fp),&br);
+        if(res!=RES_OK){
+            printf("read file failed,%d\n",res);
             f_close(&fp);
             f_mount(NULL,  "1:",  1);
+            return 5;
         }
+        printf("read file ok,file:%s\n",read_buf);
+        f_close(&fp);
+        f_mount(NULL,  "1:",  1);
     }else{
         return 3;
     }
