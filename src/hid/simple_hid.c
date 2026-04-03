@@ -4,17 +4,19 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-
 #include "simple_hid.h"
-#include "simple_data_recv.h"
 #include "../w25qxx/w25qxx.h"
-#include "../data_process/data_process.h"
+#include "../variant/variant.h"
+#ifdef ENABLE_FATFS
+#include "../fatfs/ff.h"
+#endif
 #include "CH58x_common.h"
 
 uint8_t *recv_data_buffer = NULL;
-extern char *displayBuffer;
+
 uint8_t gpio_sim_level[2] = {0x0, 0x0};
 uint8_t gpio_sim_direction[2] = {0x0, 0x0};
+
 void print_hex(const char *label, const uint8_t *data, size_t length)
 {
     printf("%s: ", label);
@@ -298,9 +300,724 @@ final:
 }
 int handle_mcu_opt_SPI_W25Q64_COMMAND(uint8_t *data, uint8_t data_length, int port_number, uint8_t **resp_data, uint8_t *resp_data_length)
 {
-    // TODO : SPI_W25Q64_COMMAND
-    return PARSE_STATUS_SUCCESS;
+    // SPI_W25Q64_COMMAND
+    /*
+    操作SPI FLASH，可以根据偏移读取数据，或者使用FATFS读写SPI EEPROM里面文件
+    0x03 [ACTION] [DATA1]
+    ACTION:
+    0x0 EEPROM_ID
+    0x1 READ_RAW_DATA  [OFFSET(4bytes)] [LENGTH(2bytes)]
+    0x2 WRITE_RAW_DATA [OFFSET(4bytes)] [LENGTH(2bytes)] [DATA]
+    0x3 ERASE_CHIP     NO DATA1
+    0x4 ERASE_BLOCK    [OFFSET(4bytes)]
+    */
+    if (data_length < 2)
+        return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+    uint8_t action = data[1];
+
+    if (action == 0x0) // EEPROM_ID
+    {
+        uint8_t id[4] = {0};
+        BSP_W25Qx_Read_ID(id);
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x6; // len=5: status(1) + action(1) + id(4) - 但按协议len不含status
+        *(hdr + 2) = 0x00; // status OK
+        *(hdr + 3) = action;
+        memcpy(hdr + 4, id, 4);
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 1 + 1 + 4);
+        *(hdr + 8) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 1 + 1 + 4 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == 0x1) // READ_RAW_DATA [OFFSET(4)] [LENGTH(2)]
+    {
+        if (data_length < 7)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint32_t offset = (uint32_t)data[2] | ((uint32_t)data[3] << 8) |
+                          ((uint32_t)data[4] << 16) | ((uint32_t)data[5] << 24);
+        uint16_t length = (uint16_t)data[6] | ((uint16_t)data[7] << 8);
+
+        if (length == 0 || length > 52)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint8_t *read_buf = malloc(length);
+        if (read_buf == NULL)
+            return PARSE_STATUS_FAILED;
+
+        uint8_t ret = BSP_W25Qx_Read(read_buf, offset, length);
+        if (ret != W25Qx_OK)
+        {
+            free(read_buf);
+            uint8_t data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_FAILED, 0, 0, resp_data);
+            *resp_data_length = data_len;
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        // resp: [MAGIC][CMD|0x20][LEN][STATUS][ACTION][DATA...][CHECKSUM]
+        // LEN = 1(status) + 1(action) + length
+        uint8_t resp_len_field = 1 + 1 + length;
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = resp_len_field;
+        *(hdr + 2) = 0x00; // status OK
+        *(hdr + 3) = action;
+        memcpy(hdr + 4, read_buf, length);
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + resp_len_field);
+        *(hdr + 4 + length) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + resp_len_field + 1;
+
+        free(read_buf);
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == 0x2) // WRITE_RAW_DATA [OFFSET(4)] [LENGTH(2)] [DATA]
+    {
+        if (data_length < 8)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint32_t offset = (uint32_t)data[2] | ((uint32_t)data[3] << 8) |
+                          ((uint32_t)data[4] << 16) | ((uint32_t)data[5] << 24);
+        uint16_t length = (uint16_t)data[6] | ((uint16_t)data[7] << 8);
+
+        if (length == 0 || (8 + length) > data_length)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        // 按4KB块对齐擦除，需要先读回块内原有数据再合并写入
+        uint32_t block_base = offset & ~(0xFFF);
+        uint32_t block_offset = offset - block_base;
+
+        uint8_t *block_buf = malloc(4096);
+        if (block_buf == NULL)
+            return PARSE_STATUS_FAILED;
+
+        BSP_W25Qx_Read(block_buf, block_base, 4096);
+        memcpy(block_buf + block_offset, data + 7, length);
+        BSP_W25Qx_Erase_Block(block_base);
+        uint8_t ret = BSP_W25Qx_Write(block_buf, block_base, 4096);
+        free(block_buf);
+        uint8_t status = (ret == W25Qx_OK) ? 0x00 : 0x01;
+
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x2; // len=2: status(1) + action(1)
+        *(hdr + 2) = status;
+        *(hdr + 3) = action;
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
+        *(hdr + 4) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 2 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == 0x3) // ERASE_CHIP
+    {
+        uint8_t ret = BSP_W25Qx_Erase_Chip();
+        uint8_t status = (ret == W25Qx_OK) ? 0x00 : 0x01;
+
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x2;
+        *(hdr + 2) = status;
+        *(hdr + 3) = action;
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
+        *(hdr + 4) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 2 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == 0x4) // ERASE_BLOCK [OFFSET(4)]
+    {
+        if (data_length < 5)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint32_t offset = (uint32_t)data[2] | ((uint32_t)data[3] << 8) |
+                          ((uint32_t)data[4] << 16) | ((uint32_t)data[5] << 24);
+        // 按4KB块对齐
+        offset &= ~(0xFFF);
+
+        uint8_t ret = BSP_W25Qx_Erase_Block(offset);
+        uint8_t status = (ret == W25Qx_OK) ? 0x00 : 0x01;
+
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x2;
+        *(hdr + 2) = status;
+        *(hdr + 3) = action;
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
+        *(hdr + 4) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 2 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+
+    return PARSE_STATUS_INVALID_COMMAND;
 }
+int handle_mcu_opt_DATAFLASH_COMMAND(uint8_t *data, uint8_t data_length, int port_number, uint8_t **resp_data, uint8_t *resp_data_length)
+{
+    // MCU_OPT_DATAFLASH_COMMAND
+    /*
+    读写CH582的DATA_FLASH (地址范围 0x0000~0x7FFF, 共32KB)
+    0x04 [ACTION] [DATA1]
+    ACTION:
+    0x1 READ_DATA  [OFFSET(2bytes)] [LENGTH(2bytes)]
+    0x2 WRITE_DATA [OFFSET(2bytes)] [LENGTH(2bytes)] [DATA]
+    0x3 ERASE      NO DATA1 (擦除全部DataFlash)
+    */
+    if (data_length < 2)
+        return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+    uint8_t action = data[1];
+
+    if (action == 0x1) // READ_DATA [OFFSET(2)] [LENGTH(2)]
+    {
+        if (data_length < 5)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint16_t offset = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+        uint16_t length = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+
+        if (length == 0 || (uint32_t)offset + length > 0x8000)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        // 最大返回数据长度受限于64字节HID包
+        if (length > 52)
+            length = 52;
+
+        uint8_t *read_buf = malloc(length);
+        if (read_buf == NULL)
+            return PARSE_STATUS_FAILED;
+
+        EEPROM_READ((uint32_t)offset, read_buf, length);
+
+        // resp: [MAGIC][CMD|0x20][LEN][STATUS][ACTION][DATA...][CHECKSUM]
+        uint8_t resp_len_field = 1 + 1 + length;
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = resp_len_field;
+        *(hdr + 2) = 0x00; // status OK
+        *(hdr + 3) = action;
+        memcpy(hdr + 4, read_buf, length);
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + resp_len_field);
+        *(hdr + 4 + length) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + resp_len_field + 1;
+
+        free(read_buf);
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == 0x2) // WRITE_DATA [OFFSET(2)] [LENGTH(2)] [DATA]
+    {
+        if (data_length < 6)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint16_t offset = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+        uint16_t length = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+
+        if (length == 0 || (6 + length) > data_length ||
+            (uint32_t)offset + length > 0x8000)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        // 按256字节页对齐，读回-合并-擦除-写回，防止丢失页内其他数据
+        uint16_t page_base = offset & ~(0xFF);
+        uint16_t page_offset = offset - page_base;
+        // 考虑跨页的情况
+        uint16_t end_offset = page_offset + length;
+        uint16_t total_pages = (end_offset + 255) / 256;
+
+        uint8_t *page_buf = malloc(total_pages * 256);
+        if (page_buf == NULL)
+            return PARSE_STATUS_FAILED;
+
+        uint32_t ret = 0;
+        for (uint16_t i = 0; i < total_pages; i++)
+        {
+            uint16_t cur_page_base = page_base + i * 256;
+            // 读回该页原有数据
+            EEPROM_READ((uint32_t)cur_page_base, page_buf + i * 256, 256);
+            // 擦除该页
+            EEPROM_ERASE((uint32_t)cur_page_base, 256);
+        }
+        // 合并新数据到缓冲区
+        memcpy(page_buf + page_offset, data + 5, length);
+        // 写回所有页
+        for (uint16_t i = 0; i < total_pages; i++)
+        {
+            uint16_t cur_page_base = page_base + i * 256;
+            ret = EEPROM_WRITE((uint32_t)cur_page_base, page_buf + i * 256, 256);
+            if (ret != 0)
+                break;
+        }
+        free(page_buf);
+
+        uint8_t status = (ret == 0) ? 0x00 : 0x01;
+
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x2; // len=2: status(1) + action(1)
+        *(hdr + 2) = status;
+        *(hdr + 3) = action;
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
+        *(hdr + 4) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 2 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == 0x3) // ERASE (擦除全部DataFlash)
+    {
+        // DataFlash最小擦除单位为256字节(EEPROM_MIN_ER_SIZE), 按4KB块擦除
+        uint32_t ret = 0;
+        for (uint32_t addr = 0; addr < 0x8000; addr += 4096)
+        {
+            ret = EEPROM_ERASE(addr, 4096);
+            if (ret != 0)
+                break;
+        }
+        uint8_t status = (ret == 0) ? 0x00 : 0x01;
+
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x2;
+        *(hdr + 2) = status;
+        *(hdr + 3) = action;
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
+        *(hdr + 4) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 2 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+
+    return PARSE_STATUS_INVALID_COMMAND;
+}
+// Variant变量存储区，支持ID 0xF0~0xFF，共16个变量槽
+struct Variant variant_slots[16] = {0};
+
+int handle_mcu_opt_VAR_SET_COMMAND(uint8_t *data, uint8_t data_length, int port_number, uint8_t **resp_data, uint8_t *resp_data_length)
+{
+    // MCU_OPT_VAR_SET_COMMAND
+    /*
+    使用variant库的相关函数，维护一个支持ID为0xf1-0xff的变量组合
+    0x05 [VAR_ID(1byte)] [PACKED_VARIANT_DATA]
+    VAR_ID范围: 0xF1~0xFF (共15个槽)
+    PACKED_VARIANT_DATA: 由variant库的pack_packet生成的二进制数据
+    写入时: [VAR_ID] [PACKED_VARIANT_DATA]
+    读取时: [VAR_ID] (无额外数据)
+    */
+    if (data_length < 2)
+        return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+    uint8_t var_id = data[1];
+    if (var_id < 0xF0 || var_id > 0xFF)
+    {
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x2;
+        *(hdr + 2) = 0x01; // status FAILED
+        *(hdr + 3) = var_id;
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
+        *(hdr + 4) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 2 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+
+    uint8_t slot_index = var_id - 0xF0;
+
+    if (data_length == 2)
+    {
+        // 读取操作：无PACKED_VARIANT_DATA，返回当前存储的变量
+        unsigned char pack_buf[32] = {0};
+        int packed_len = pack_packet(pack_buf, sizeof(pack_buf), &variant_slots[slot_index]);
+
+        if (packed_len < 0)
+            packed_len = 0;
+
+        // resp: [MAGIC][CMD|0x20][LEN][STATUS][VAR_ID][PACKED_DATA...][CHECKSUM]
+        uint8_t resp_len_field = 1 + 1 + packed_len; // status + var_id + packed_data
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = resp_len_field;
+        *(hdr + 2) = 0x00; // status OK
+        *(hdr + 3) = var_id;
+        if (packed_len > 0)
+            memcpy(hdr + 4, pack_buf, packed_len);
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + resp_len_field);
+        *(hdr + 4 + packed_len) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + resp_len_field + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+    else
+    {
+        // 写入操作：data[2..]为PACKED_VARIANT_DATA
+        struct Variant var;
+        int parsed = parse_next_packet(&var, data + 2, data_length - 2);
+        if (parsed < 0)
+        {
+            uint8_t *req = make_header();
+            uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+            *hdr = COMMAND_MCU_OPT | 0x20;
+            *(hdr + 1) = 0x2;
+            *(hdr + 2) = 0x01-parsed; // status FAILED
+            *(hdr + 3) = var_id;
+            uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
+            *(hdr + 4) = checksum;
+            *resp_data = req;
+            *resp_data_length = 2 + 1 + 1 + 2 + 1;
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        variant_slots[slot_index] = var;
+
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x2;
+        *(hdr + 2) = 0x00; // status OK
+        *(hdr + 3) = var_id;
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
+        *(hdr + 4) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 2 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+}
+
+// FatFS 文件系统命令
+#ifdef ENABLE_FATFS
+typedef struct {
+    char name[FATFS_MAX_FILENAME + 1];
+    uint32_t size;
+    uint8_t attrib;
+} FileEntry;
+
+static FATFS fatfs_work;
+static uint8_t fs_mounted = 0;
+static FileEntry file_cache[FATFS_MAX_FILES];
+static uint8_t file_count = 0;
+
+static int ensure_mounted(void)
+{
+    if (fs_mounted) return 0;
+    FRESULT fr = f_mount(&fatfs_work, "1:", 1);
+    if (fr != FR_OK) return -1;
+    fs_mounted = 1;
+    return 0;
+}
+
+static void write_le32(uint8_t *p, uint32_t val)
+{
+    p[0] = (uint8_t)(val & 0xFF);
+    p[1] = (uint8_t)((val >> 8) & 0xFF);
+    p[2] = (uint8_t)((val >> 16) & 0xFF);
+    p[3] = (uint8_t)((val >> 24) & 0xFF);
+}
+
+static void write_le16_local(uint8_t *p, uint16_t val)
+{
+    p[0] = (uint8_t)(val & 0xFF);
+    p[1] = (uint8_t)((val >> 8) & 0xFF);
+}
+
+static void fatfs_scan_files(void)
+{
+    DIR dir;
+    FILINFO fno;
+    file_count = 0;
+
+    if (f_opendir(&dir, "1:/") != FR_OK) return;
+
+    while (file_count < FATFS_MAX_FILES) {
+        if (f_readdir(&dir, &fno) != FR_OK || fno.fname[0] == 0) break;
+        if (fno.fattrib & AM_DIR) continue;
+        if (strncmp(fno.fname, "display_", 8) != 0) continue;
+        if (strlen(fno.fname) > FATFS_MAX_FILENAME) continue;
+
+        strncpy(file_cache[file_count].name, fno.fname, FATFS_MAX_FILENAME);
+        file_cache[file_count].name[FATFS_MAX_FILENAME] = '\0';
+        file_cache[file_count].size = (uint32_t)fno.fsize;
+        file_cache[file_count].attrib = fno.fattrib;
+        file_count++;
+    }
+    f_closedir(&dir);
+}
+
+static void fatfs_make_resp(uint8_t action, uint8_t status, const uint8_t *extra, uint8_t extra_len,
+                            uint8_t **resp_data, uint8_t *resp_data_length)
+{
+    // resp: [MAGIC(2)][CMD=0x22][LEN][STATUS][ACTION][EXTRA...][CHECKSUM]
+    uint8_t resp_len_field = 1 + 1 + extra_len; // status + action + extra
+    uint8_t *req = make_header();
+    uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+    *hdr = COMMAND_MCU_OPT | 0x20;
+    *(hdr + 1) = resp_len_field;
+    *(hdr + 2) = status;
+    *(hdr + 3) = action;
+    if (extra_len > 0 && extra != NULL)
+        memcpy(hdr + 4, extra, extra_len);
+    uint8_t checksum = make_checksum(req, 2 + 1 + 1 + resp_len_field);
+    *(hdr + 4 + extra_len) = checksum;
+    *resp_data = req;
+    *resp_data_length = 2 + 1 + 1 + resp_len_field + 1;
+}
+
+int handle_mcu_opt_FATFS_COMMAND(uint8_t *data, uint8_t data_length, int port_number,
+                                 uint8_t **resp_data, uint8_t *resp_data_length)
+{
+    if (data_length < 2)
+        return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+    uint8_t action = data[1];
+
+    if (action == FATFS_ACTION_CHECK_FORMATTED) // 0x01
+    {
+        FRESULT fr = f_mount(&fatfs_work, "1:", 1);
+        if (fr == FR_NO_FILESYSTEM) {
+            fs_mounted = 0;
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+        if (fr != FR_OK) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+        fs_mounted = 1;
+        DIR dir;
+        fr = f_opendir(&dir, "1:/");
+        if (fr == FR_OK) {
+            f_closedir(&dir);
+            fatfs_make_resp(action, 0x00, NULL, 0, resp_data, resp_data_length);
+        } else {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+        }
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == FATFS_ACTION_SCAN_FILES) // 0x02
+    {
+        if (ensure_mounted() != 0) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+        fatfs_scan_files();
+        uint8_t extra[1] = { file_count };
+        fatfs_make_resp(action, 0x00, extra, 1, resp_data, resp_data_length);
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == FATFS_ACTION_GET_FILE_INFO) // 0x03
+    {
+        if (data_length < 3)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint8_t file_index = data[2];
+        if (file_index >= file_count) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        // extra: [FILESIZE(4B)][TOTAL_CHUNKS(2B)][FILENAME...\0]
+        uint32_t fsize = file_cache[file_index].size;
+        uint16_t total_chunks = (uint16_t)((fsize + FATFS_READ_CHUNK_SIZE - 1) / FATFS_READ_CHUNK_SIZE);
+        uint8_t name_len = (uint8_t)strlen(file_cache[file_index].name);
+        uint8_t extra[4 + 2 + FATFS_MAX_FILENAME + 1]; // max possible
+        write_le32(extra, fsize);
+        write_le16_local(extra + 4, total_chunks);
+        memcpy(extra + 6, file_cache[file_index].name, name_len + 1); // include \0
+        uint8_t extra_total = 6 + name_len + 1;
+
+        fatfs_make_resp(action, 0x00, extra, extra_total, resp_data, resp_data_length);
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == FATFS_ACTION_READ_FILE) // 0x04
+    {
+        // data: [ACTION][FILE_INDEX(1B)][CHUNK_INDEX(2B LE16)]
+        if (data_length < 5)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint8_t file_index = data[2];
+        uint16_t chunk_index = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
+
+        if (file_index >= file_count) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        // build path
+        char path[64];
+        snprintf(path, sizeof(path), "1:/%s", file_cache[file_index].name);
+
+        FIL fp;
+        FRESULT fr = f_open(&fp, path, FA_READ);
+        if (fr != FR_OK) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        uint32_t offset = (uint32_t)chunk_index * FATFS_READ_CHUNK_SIZE;
+        if (offset >= f_size(&fp)) {
+            f_close(&fp);
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        f_lseek(&fp, offset);
+        uint8_t read_buf[FATFS_READ_CHUNK_SIZE];
+        UINT bytes_read = 0;
+        fr = f_read(&fp, read_buf, FATFS_READ_CHUNK_SIZE, &bytes_read);
+        f_close(&fp);
+
+        if (fr != FR_OK || bytes_read == 0) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        // extra: [CHUNK_INDEX(2B)][BYTES_READ(1B)][DATA...]
+        uint8_t extra[2 + 1 + FATFS_READ_CHUNK_SIZE];
+        write_le16_local(extra, chunk_index);
+        extra[2] = (uint8_t)bytes_read;
+        memcpy(extra + 3, read_buf, bytes_read);
+
+        fatfs_make_resp(action, 0x00, extra, 3 + bytes_read, resp_data, resp_data_length);
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == FATFS_ACTION_CREATE_FILE) // 0x05
+    {
+        // data: [ACTION][FILENAME_LEN(1B)][FILENAME...][FILE_SIZE(4B LE32)]
+        if (data_length < 3)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint8_t name_len = data[2];
+        if (name_len == 0 || name_len > FATFS_MAX_FILENAME || (3 + name_len + 4) > data_length)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        char fname[FATFS_MAX_FILENAME + 1];
+        memcpy(fname, data + 3, name_len);
+        fname[name_len] = '\0';
+
+        // 验证文件名以 display_ 开头
+        if (strncmp(fname, "display_", 8) != 0) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        uint32_t file_size = (uint32_t)data[3 + name_len] | ((uint32_t)data[4 + name_len] << 8) |
+                             ((uint32_t)data[5 + name_len] << 16) | ((uint32_t)data[6 + name_len] << 24);
+
+        if (ensure_mounted() != 0) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        char path[64];
+        snprintf(path, sizeof(path), "1:/%s", fname);
+
+        FIL fp;
+        FRESULT fr = f_open(&fp, path, FA_CREATE_NEW | FA_WRITE);
+        if (fr != FR_OK) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        if (file_size > 0) {
+            // 预分配文件大小
+            f_lseek(&fp, file_size - 1);
+            uint8_t zero = 0;
+            UINT bw;
+            f_write(&fp, &zero, 1, &bw);
+        }
+        f_close(&fp);
+
+        fatfs_scan_files();
+        fatfs_make_resp(action, 0x00, NULL, 0, resp_data, resp_data_length);
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == FATFS_ACTION_WRITE_FILE) // 0x06
+    {
+        // data: [ACTION][FILE_INDEX(1B)][OFFSET(4B LE32)][DATA_LEN(1B)][DATA...]
+        if (data_length < 8)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        uint8_t file_index = data[2];
+        uint32_t offset = (uint32_t)data[3] | ((uint32_t)data[4] << 8) |
+                          ((uint32_t)data[5] << 16) | ((uint32_t)data[6] << 24);
+        uint8_t write_len = data[7];
+
+        if (file_index >= file_count) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+        if ((8 + write_len) > data_length)
+            return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
+
+        char path[64];
+        snprintf(path, sizeof(path), "1:/%s", file_cache[file_index].name);
+
+        FIL fp;
+        FRESULT fr = f_open(&fp, path, FA_WRITE);
+        if (fr != FR_OK) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        f_lseek(&fp, offset);
+        UINT bw = 0;
+        fr = f_write(&fp, data + 8, write_len, &bw);
+        f_close(&fp);
+
+        if (fr != FR_OK) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        fatfs_scan_files();
+        fatfs_make_resp(action, 0x00, NULL, 0, resp_data, resp_data_length);
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == FATFS_ACTION_GET_FS_INFO) // 0x07
+    {
+        if (ensure_mounted() != 0) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        DWORD free_clst = 0;
+        FATFS *fatfs_ptr = NULL;
+        FRESULT fr = f_getfree("1:", &free_clst, &fatfs_ptr);
+        if (fr != FR_OK) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        // total = (n_fatent - 2) * csize * sector_size
+        // free = free_clst * csize * sector_size
+        DWORD sector_size = (DWORD)fatfs_ptr->ssize;
+        uint32_t total_bytes = (uint32_t)((fatfs_ptr->n_fatent - 2) * fatfs_ptr->csize * sector_size);
+        uint32_t free_bytes = (uint32_t)(free_clst * fatfs_ptr->csize * sector_size);
+
+        // extra: [TOTAL(4B LE32)][FREE(4B LE32)]
+        uint8_t extra[8];
+        write_le32(extra, total_bytes);
+        write_le32(extra + 4, free_bytes);
+
+        fatfs_make_resp(action, 0x00, extra, 8, resp_data, resp_data_length);
+        return PARSE_STATUS_SUCCESS;
+    }
+
+    return PARSE_STATUS_INVALID_COMMAND;
+}
+#endif /* ENABLE_FATFS */
+
 int handle_mcu_opt(uint8_t *data, uint8_t data_length, int port_number, uint8_t **resp_data, uint8_t *resp_data_length)
 {
     //printf("handle_mcu_opt:data_length:%d\n", data_length);
@@ -315,33 +1032,44 @@ int handle_mcu_opt(uint8_t *data, uint8_t data_length, int port_number, uint8_t 
     {
         return handle_mcu_opt_gpio_set_direction(data, data_length, port_number, resp_data, resp_data_length);
     }
+    if (mcu_opt_command == MCU_OPT_DATAFLASH_COMMAND)
+    {
+        return handle_mcu_opt_DATAFLASH_COMMAND(data, data_length, port_number, resp_data, resp_data_length);
+    }
     if (mcu_opt_command == MCU_OPT_SPI_W25Q64_COMMAND)
     {
         return handle_mcu_opt_SPI_W25Q64_COMMAND(data, data_length, port_number, resp_data, resp_data_length);
     }
+    if (mcu_opt_command == MCU_OPT_VAR_SET_COMMAND)
+    {
+        return handle_mcu_opt_VAR_SET_COMMAND(data, data_length, port_number, resp_data, resp_data_length);
+    }
+#ifdef ENABLE_FATFS
+    if (mcu_opt_command == MCU_OPT_FATFS_COMMAND)
+    {
+        return handle_mcu_opt_FATFS_COMMAND(data, data_length, port_number, resp_data, resp_data_length);
+    }
+#endif
     return PARSE_STATUS_INVALID_COMMAND;
 }
 int handle_send_data(uint8_t *data, uint8_t data_length, int port_number, uint8_t **resp_data, uint8_t *resp_data_length)
 {
     uint8_t recv_port_number = *(data);
-    uint8_t data_len = 0;
-    int i=0;
-    ParsedData parse_data;
-    if(recv_port_number == 0 || recv_port_number == 1){
-        if(parse_packet((const uint8_t*)(data + 1),data_length - 1,&parse_data)==0){
-            if(parse_data.data_count>0){
-                for(i=0;i<parse_data.data_count;i++){
-                    if(parse_data.data_points[i].type==DATA_TYPE_TEMPERATURE){
-                        update_temp(parse_data.data_points[i].value);
-                    }
-                }
-            }
-        }
+    uint8_t spi_command = *(data + 1);
+    uint8_t data_len =0;
+    if(spi_command==0x0){
+        uint8_t id[4]={0xFF,0xFF,0xFF,0XFF};
+        BSP_W25Qx_Read_ID(id);
+        data_len=make_recv_data_resp(recv_port_number, id,4, resp_data);
+        *resp_data_length = data_len;
+        return PARSE_STATUS_SUCCESS;
     }
+    data_len = make_simple_code_resp(COMMAND_SEND_DATA, 0x2, resp_data);
+    *resp_data_length = data_len;
     //print_hex("handle_send_data:port", data, 1);
     //print_hex("handle_send_data:data", data + 1, data_length - 1);
-    data_len = make_simple_code_resp(COMMAND_SEND_DATA, 0x1, resp_data);
-    *resp_data_length = data_len;
+    //uint8_t data_len = make_simple_code_resp(COMMAND_SEND_DATA, 0x1, resp_data);
+    //*resp_data_length = data_len;
     //printf("already set recv_data\n");
     /*
     uint8_t recv_data_len = make_recv_data_resp(recv_port_number, data + 1, data_length - 1, &recv_data_buffer);
@@ -349,10 +1077,18 @@ int handle_send_data(uint8_t *data, uint8_t data_length, int port_number, uint8_
         memset(pEP1_IN_DataBuf,0,64);
         memcpy(pEP1_IN_DataBuf,recv_data_buffer,recv_data_len);
         DevEP1_IN_Deal(64);
+        free(recv_data_buffer);
+        recv_data_buffer=NULL;
     }else if(recv_port_number==1){
         memset(pU2EP1_IN_DataBuf,0,64);
         memcpy(pU2EP1_IN_DataBuf,recv_data_buffer,recv_data_len);
         U2DevEP1_IN_Deal(64);
+        free(recv_data_buffer);
+        recv_data_buffer=NULL;
+    }
+    if(recv_data_buffer != NULL) {
+      free(recv_data_buffer);
+      recv_data_buffer = NULL;
     }
         */
     return PARSE_STATUS_SUCCESS;
@@ -405,9 +1141,16 @@ int parse_data(uint8_t *data, uint8_t data_length, int port_number, uint8_t **re
     {
         ret = handle_send_data(command_data, command_data_len, port_number, resp_data, resp_data_length);
     }
-    if (ret == PARSE_STATUS_SUCCESS && resp_data != NULL)
+    if (ret == PARSE_STATUS_SUCCESS && resp_data != NULL){
+        if(command_data!=NULL)
+            free(command_data);
+        command_data=NULL;
         return ret;
+    }
 error:
     *resp_data_length = make_error_resp(ret, resp_data);
+    if(command_data!=NULL)
+        free(command_data);
+    command_data=NULL;
     return ret;
 }

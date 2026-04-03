@@ -1,5 +1,10 @@
 #ifndef __SIMPLE_HID_H__
 #define __SIMPLE_HID_H__
+
+#include "../variant/variant.h"
+
+extern struct Variant variant_slots[16];
+
 #define SUCCESS 0
 #define FAILED 1
 
@@ -23,6 +28,23 @@
 #define MCU_OPT_COMMAND_GPIO_LEVEL 0x01
 #define MCU_OPT_GPIO_SET_DIRECTION 0x02
 #define MCU_OPT_SPI_W25Q64_COMMAND 0x03
+#define MCU_OPT_DATAFLASH_COMMAND 0x04
+#define MCU_OPT_VAR_SET_COMMAND 0x05
+#ifdef ENABLE_FATFS
+#define MCU_OPT_FATFS_COMMAND 0x06
+
+#define FATFS_ACTION_CHECK_FORMATTED    0x01
+#define FATFS_ACTION_SCAN_FILES         0x02
+#define FATFS_ACTION_GET_FILE_INFO      0x03
+#define FATFS_ACTION_READ_FILE          0x04
+#define FATFS_ACTION_CREATE_FILE        0x05
+#define FATFS_ACTION_WRITE_FILE         0x06
+#define FATFS_ACTION_GET_FS_INFO        0x07
+
+#define FATFS_MAX_FILES       64
+#define FATFS_MAX_FILENAME    32
+#define FATFS_READ_CHUNK_SIZE 52
+#endif
 
 #define MCU_GPIO_WRITE 0x1
 #define MCU_GPIO_READ 0x0
@@ -59,5 +81,8 @@ int handle_port_info(uint8_t *data,uint8_t data_length,int port_number,uint8_t *
 int handle_mcu_opt_gpio_level(uint8_t *data,uint8_t data_length,int port_number,uint8_t **resp_data,uint8_t *resp_data_length);
 int handle_mcu_opt_gpio_set_direction(uint8_t *data,uint8_t data_length,int port_number,uint8_t **resp_data,uint8_t *resp_data_length);
 int handle_mcu_opt(uint8_t *data,uint8_t data_length,int port_number,uint8_t **resp_data,uint8_t *resp_data_length);
+#ifdef ENABLE_FATFS
+int handle_mcu_opt_FATFS_COMMAND(uint8_t *data,uint8_t data_length,int port_number,uint8_t **resp_data,uint8_t *resp_data_length);
+#endif
 int handle_send_data(uint8_t *data,uint8_t data_length,int port_number,uint8_t **resp_data,uint8_t *resp_data_length);
 #endif

@@ -16,13 +16,3 @@ int myPrintf(const char *fmt, ...)
     data = NULL;
     return 0;
 }
-int mySprintf(char * buffer,const char *fmt, ...)
-{
-    va_list arg;
-    va_start(arg, fmt);
-    int len = vsnprintf(NULL, 0, fmt, arg);
-    uint8_t *data = (uint8_t *) malloc(len);
-    vsprintf((char *) buffer, fmt, arg);
-    va_end(arg);
-    return 0;
-}

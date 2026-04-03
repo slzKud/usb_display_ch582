@@ -9,18 +9,18 @@
  * Attention: This software (modified or not) and binary are used for 
  * microcontroller manufactured by Nanjing Qinheng Microelectronics.
  *******************************************************************************/
-
-#include <stdio.h>
-#include <string.h>
+#include <stdlib.h>
 #include "CH58x_common.h"
 #include "printf.h"
 #include "hid/simple_hid.h"
-#include "ch58x_soft_I2C.h"
-#include "ch58x_u8g2.h"
-#include "data_process/data_process.h"
+#include "u8g2_cross/port/ch582/ch58x_soft_I2C.h"
+#include "u8g2_cross/port/ch582/ch58x_u8g2.h"
 #include "w25qxx/w25qxx.h"
-#include "ch58x_fatfs.h"
-#include <stdlib.h>
+#include "u8g2_dataflash_cb.h"
+#include "parser/parser.h"
+#include "text_format.h"
+
+extern const uint8_t myfont2_lite[];
 // 支持的最大接口数量
 #define USB_INTERFACE_MAX_NUM       1
 // 接口号的最大值，例程只有一个接口，接口号为0
@@ -28,13 +28,14 @@
 
 #define DevEP0SIZE    0x40
 #define DevEP1SIZE    0x40
-#define U2DevEP0SIZE    0x40
-#define U2DevEP1SIZE    0x40
 
 u8g2_t u8g2;
+uint8_t current_font_index = 0x0;
+uint32_t font_offset = 0x0;
+uint32_t max_size = 0x04cd;
+
 // 设备描述符
-const uint8_t MyDevDescr[] = {0x12,0x01,0x10,0x01,0x00,0x00,0x00,DevEP0SIZE,0x3d,0x41,0x08,0x21,0x00,0x00,0x01,0x02,0x00,0x01};
-const uint8_t U2MyDevDescr[] = {0x12,0x01,0x10,0x01,0x00,0x00,0x00,U2DevEP0SIZE,0x3d,0x41,0x08,0x21,0x00,0x00,0x01,0x02,0x00,0x01};
+const uint8_t MyDevDescr[] = {0x12,0x01,0x10,0x01,0x00,0x00,0x00,DevEP0SIZE,0x3d,0x41,0x07,0x21,0x00,0x00,0x01,0x02,0x00,0x01};
 // 配置描述符
 const uint8_t MyCfgDescr[] = {
     0x09,0x02,0x29,0x00,0x01,0x01,0x04,0xA0,0x23,               //配置描述符
@@ -42,13 +43,6 @@ const uint8_t MyCfgDescr[] = {
     0x09,0x21,0x00,0x01,0x00,0x01,0x22,0x22,0x00,               //HID类描述符
     0x07,0x05,0x81,0x03,DevEP1SIZE,0x00,0x01,              //端点描述符
     0x07,0x05,0x01,0x03,DevEP1SIZE,0x00,0x01               //端点描述符
-};
-const uint8_t U2MyCfgDescr[] = {
-    0x09,0x02,0x29,0x00,0x01,0x01,0x04,0xA0,0x23,               //配置描述符
-    0x09,0x04,0x00,0x00,0x02,0x03,0x00,0x00,0x05,               //接口描述符
-    0x09,0x21,0x00,0x01,0x00,0x01,0x22,0x22,0x00,               //HID类描述符
-    0x07,0x05,0x81,0x03,U2DevEP1SIZE,0x00,0x01,              //端点描述符
-    0x07,0x05,0x01,0x03,U2DevEP1SIZE,0x00,0x01               //端点描述符
 };
 /*字符串描述符略*/
 /*HID类报表描述符*/
@@ -71,45 +65,26 @@ const uint8_t HIDDescr[] = {  0x06, 0x00,0xff,
 // 语言描述符
 const uint8_t MyLangDescr[] = {0x04, 0x03, 0x09, 0x04};
 // 厂家信息
-const uint8_t MyManuInfo[] = {0x0E, 0x03, 'S', 0, 'F', 0, 'w', 0, 'o', 0, 'r', 0, 'k', 0};
+const uint8_t MyManuInfo[] = {0x0E, 0x03, 's', 0, 'l', 0, 'z', 0, 'k', 0, 'u', 0, 'd', 0};
 // 产品信息
-const uint8_t MyProdInfo[] = {18, 0x03, 'U', 0, 'S', 0, 'B', 0, ' ', 0, 'D', 0,'I', 0,'S', 0,'P', 0};
-const uint8_t U2MyProdInfo[] = {16, 0x03, 'C', 0, 'H', 0, '5', 0, '8', 0, 'x', 0,'-', 0,'2', 0};
-// 字符显示缓冲区
-char *displayBuffer;
-uint8_t displayPos[2]={0x0,0x0};
+const uint8_t MyProdInfo[] = {18, 0x03, 'U', 0, 'S', 0, 'B', 0, '-', 0, 'D', 0,'i', 0,'s', 0,'p', 0};
 /**********************************************************/
 uint8_t        DevConfig, Ready = 0;
 uint8_t        SetupReqCode;
 uint16_t       SetupReqLen;
 const uint8_t *pDescr;
-uint8_t        U2DevConfig, U2Ready = 0;
-uint8_t        U2SetupReqCode;
-uint16_t       U2SetupReqLen;
-const uint8_t *U2pDescr;
 uint8_t        Report_Value[USB_INTERFACE_MAX_INDEX+1] = {0x00};
 uint8_t        Idle_Value[USB_INTERFACE_MAX_INDEX+1] = {0x00};
-uint8_t        U2Report_Value[USB_INTERFACE_MAX_INDEX+1] = {0x00};
-uint8_t        U2Idle_Value[USB_INTERFACE_MAX_INDEX+1] = {0x00};
 uint8_t        USB_SleepStatus = 0x00; /* USB睡眠状态 */
-uint8_t        U2USB_SleepStatus = 0x00; /* USB睡眠状态 */
 //HID设备中断传输中上传给主机4字节的数据
 uint8_t HID_Buf[] = {0,0,0,0};
 uint8_t HID_Buf1[] = {0,0,0,0};
 uint8_t HID_MsgLen=sizeof(HID_Buf);
-uint8_t U2HID_Buf[] = {0,0,0,0};
-uint8_t U2HID_MsgLen=sizeof(U2HID_Buf);
 /******** 用户自定义分配端点RAM ****************************************/
 __attribute__((aligned(4))) uint8_t EP0_Databuf[64 + 64 + 64]; //ep0(64)+ep4_out(64)+ep4_in(64)
 __attribute__((aligned(4))) uint8_t EP1_Databuf[64 + 64];      //ep1_out(64)+ep1_in(64)
 __attribute__((aligned(4))) uint8_t EP2_Databuf[64 + 64];      //ep2_out(64)+ep2_in(64)
 __attribute__((aligned(4))) uint8_t EP3_Databuf[64 + 64];      //ep3_out(64)+ep3_in(64)
-
-__attribute__((aligned(4))) uint8_t U2EP0_Databuf[64 + 64 + 64]; //ep0(64)+ep4_out(64)+ep4_in(64)
-__attribute__((aligned(4))) uint8_t U2EP1_Databuf[64 + 64];      //ep1_out(64)+ep1_in(64)
-__attribute__((aligned(4))) uint8_t U2EP2_Databuf[64 + 64];      //ep2_out(64)+ep2_in(64)
-__attribute__((aligned(4))) uint8_t U2EP3_Databuf[64 + 64];      //ep3_out(64)+ep3_in(64)
-
 /*********************************************************************
  * @fn      USB_DevTransProcess
  *
@@ -544,446 +519,6 @@ void DevWakeup(void)
     R8_UDEV_CTRL &= ~RB_UD_LOW_SPEED;
     R16_PIN_ANALOG_IE |= RB_PIN_USB_DP_PU;
 }
-
-/*********************************************************************
- * @fn      USB2_DevTransProcess
- *
- * @brief   USB2 传输处理函数
- *
- * @return  none
- */
-void USB2_DevTransProcess(void)  //USB设备传输中断处理
-{
-    //printf("U2 USB2_DevTransProcess 1\n");
-    uint8_t len, chtype;        //len用于拷贝函数，chtype用于存放数据传输方向、命令的类型、接收的对象等信息
-    uint8_t intflag, errflag = 0;   //intflag用于存放标志寄存器值，errflag用于标记是否支持主机的指令
-
-    intflag = R8_USB2_INT_FG;        //取得中断标识寄存器的值
-
-    if(intflag & RB_UIF_TRANSFER)   //判断_INT_FG中的USB传输完成中断标志位。若有传输完成中断了，进if语句
-    {
-        //printf("U2 USB2_DevTransProcess 1\n");
-        if((R8_USB2_INT_ST & MASK_UIS_TOKEN) != MASK_UIS_TOKEN) // 非空闲   //判断中断状态寄存器中的5:4位，查看令牌的PID标识。若这两位不是11（表示空闲），进if语句
-        {
-            //printf("U2 USB2_DevTransProcess 2\n");
-            switch(R8_USB2_INT_ST & (MASK_UIS_TOKEN | MASK_UIS_ENDP))    //取得令牌的PID标识和设备模式下的3:0位的端点号。主机模式下3:0位是应答PID标识位
-            // 分析操作令牌和端点号
-            {                           //端点0用于控制传输。以下的端点0的IN和OUT令牌相应程序，对应控制传输的数据阶段和状态阶段。
-                case UIS_TOKEN_IN:      //令牌包的PID为IN，5:4位为10。3:0位的端点号为0。IN令牌：设备给主机发数据。_UIS_：USB中断状态
-                {                       //端点0为双向端点，用作控制传输。 “|0”运算省略了
-                    switch(U2SetupReqCode)//这个值会在收到SETUP包时赋值。在后面会有SETUP包处理程序，对应控制传输的设置阶段。
-                    {
-                        case USB_GET_DESCRIPTOR:    //USB标准命令，主机从USB设备获取描述
-                            //printf("U2 USB_GET_DESCRIPTOR 1\n");
-                            len = U2SetupReqLen >= U2DevEP0SIZE ? U2DevEP0SIZE : U2SetupReqLen; // 本次包传输长度。最长为64字节，超过64字节的分多次处理，前几次要满包。
-                            memcpy(pU2EP0_DataBuf, U2pDescr, len);//memcpy:内存拷贝函数，从(二号位)地址拷贝(三号位)字符串长度到(一号位)地址中
-                            //DMA直接与内存相连，会检测到内存的改写，而后不用单片机控制就可以将内存中的数据发送出去。如果只是两个数组互相赋值，不涉及与DMA匹配的物理内存，就无法触发DMA。
-                            U2SetupReqLen -= len;     //记录剩下的需要发送的数据长度
-                            U2pDescr += len;          //更新接下来需要发送的数据的起始地址,拷贝函数用
-                            R8_U2EP0_T_LEN = len;    //端点0发送长度寄存器中写入本次包传输长度
-                            R8_U2EP0_CTRL ^= RB_UEP_T_TOG;   // 同步切换。IN方向（对于单片机就是T方向）的PID中的DATA0和DATA1切换
-                            break;                  //赋值完端点控制寄存器的握手包响应（ACK、NAK、STALL），由硬件打包成符合规范的包，DMA自动发送
-                        case USB_SET_ADDRESS:       //USB标准命令，主机为设备设置一个唯一地址，范围0～127，0为默认地址
-                            //printf("U2 USB_SET_ADDRESS 2\n");
-                            R8_USB2_DEV_AD = (R8_USB2_DEV_AD & RB_UDA_GP_BIT) | U2SetupReqLen;
-                                    //7位地址+最高位的用户自定义地址（默认为1），或上“包传输长度”（这里的“包传输长度”在后面赋值成了地址位）
-                            R8_U2EP0_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;
-                                    //R响应OUT事务ACK，T响应IN事务NAK。这个CASE分支里是IN方向，当DMA相应内存中，单片机没有数据更新时，回NAK握手包。
-                            break;                                                  //一般程序里的OUT事务，设备会回包给主机，不响应NAK。
-
-                        case USB_SET_FEATURE:       //USB标准命令，主机要求启动一个在设备、接口或端点上的特征
-                            break;
-
-                        default:
-                            R8_U2EP0_T_LEN = 0;      //状态阶段完成中断或者是强制上传0长度数据包结束控制传输（数据字段长度为0的数据包，包里SYNC、PID、EOP字段都有）
-                            R8_U2EP0_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;
-                                    //R响应OUT事务ACK，T响应IN事务NAK。这个CASE分支里是OUT方向，当DMA相应内存中更新了数据且单片机验收正常时，回ACK握手包。
-                            U2Ready = 1;
-                            PRINT("U2Ready_STATUS = %d\n",U2Ready);
-                            break;
-                    }
-                }
-                break;
-
-                case UIS_TOKEN_OUT:     //令牌包的PID为OUT，5:4位为00。3:0位的端点号为0。OUT令牌：主机给设备发数据。
-                {                       //端点0为双向端点，用作控制传输。 “|0”运算省略了
-                    len = R8_USB2_RX_LEN;    //读取当前USB接收长度寄存器中存储的接收的数据字节数 //接收长度寄存器为各个端点共用，发送长度寄存器各有各的
-                }
-                break;
-
-                case UIS_TOKEN_OUT | 1: //令牌包的PID为OUT，端点号为1
-                {
-                    if(R8_USB2_INT_ST & RB_UIS_TOG_OK)   //硬件会判断是否正确的同步切换数据包，同步切换正确，这一位自动置位
-                    { // 不同步的数据包将丢弃
-                        R8_U2EP1_CTRL ^= RB_UEP_R_TOG;   //OUT事务的DATA同步切换。设定一个期望值。
-                        len = R8_USB2_RX_LEN;        //读取接收数据的字节数
-                        U2DevEP1_OUT_Deal(len);       //发送长度为len的字节，自动回ACK握手包。自定义的程序。
-                    }
-                }
-                break;
-
-                case UIS_TOKEN_IN | 1: //令牌包的PID为IN，端点号为1
-                    R8_U2EP1_CTRL ^= RB_UEP_T_TOG;       //IN事务的DATA切换一下。设定将要发送的包的PID。
-                    R8_U2EP1_CTRL = (R8_U2EP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;    //当DMA中没有由单片机更新数据时，将T响应IN事务置为NAK。更新了就发出数据。
-                    U2Ready = 1;
-                    PRINT("U2Ready_IN_EP1 = %d\n",U2Ready);
-                    break;
-            }
-            R8_USB2_INT_FG = RB_UIF_TRANSFER;    //写1清零中断标志
-        }
-        //printf("U2 USB2_DevTransProcess 3\n");
-        if(R8_USB2_INT_ST & RB_UIS_SETUP_ACT) // Setup包处理
-        {
-            R8_U2EP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_ACK | UEP_T_RES_NAK;
-                        //R响应OUT事务期待为DATA1（DMA收到的数据包的PID要为DATA1，否则算数据错误要重传）和ACK（DMA相应内存中收到了数据，单片机验收正常）
-                        //T响应IN事务设定为DATA1（单片机有数据送入DMA相应内存，以DATA1发送出去）和NAK（单片机没有准备好数据）。
-            U2SetupReqLen = pU2SetupReqPak->wLength;    //数据阶段的字节数      //pU2SetupReqPak：将端点0的RAM地址强制转换成一个存放结构体的地址，结构体成员依次紧凑排列
-            U2SetupReqCode = pU2SetupReqPak->bRequest;  //命令的序号
-            chtype = pU2SetupReqPak->bRequestType;    //包含数据传输方向、命令的类型、接收的对象等信息
-
-            len = 0;
-            errflag = 0;
-            if((pU2SetupReqPak->bRequestType & USB_REQ_TYP_MASK) != USB_REQ_TYP_STANDARD) //判断命令的类型，如果不是标准请求，进if语句
-            {
-                /* 非标准请求 */
-                /* 其它请求,如类请求，产商请求等 */
-                if(pU2SetupReqPak->bRequestType & 0x40)   //取得命令中的某一位，判断是否为0，不为零进if语句
-                {
-                    /* 厂商请求 */
-                }
-                else if(pU2SetupReqPak->bRequestType & 0x20)  //取得命令中的某一位，判断是否为0，不为零进if语句
-                {   //判断为HID类请求
-                    switch(SetupReqCode)    //判断命令的序号
-                    {
-                        case DEF_USB_SET_IDLE: /* 0x0A: SET_IDLE */         //主机想设置HID设备特定输入报表的空闲时间间隔
-                            U2Idle_Value[pU2SetupReqPak->wIndex] = (uint8_t)(pU2SetupReqPak->wValue>>8);
-                            break; //这个一定要有
-
-                        case DEF_USB_SET_REPORT: /* 0x09: SET_REPORT */     //主机想设置HID设备的报表描述符
-                            break;
-
-                        case DEF_USB_SET_PROTOCOL: /* 0x0B: SET_PROTOCOL */ //主机想设置HID设备当前所使用的协议
-                            U2Report_Value[pU2SetupReqPak->wIndex] = (uint8_t)(pU2SetupReqPak->wValue);
-                            break;
-
-                        case DEF_USB_GET_IDLE: /* 0x02: GET_IDLE */         //主机想读取HID设备特定输入报表的当前的空闲比率
-                            U2EP0_Databuf[0] = U2Idle_Value[pU2SetupReqPak->wIndex];
-                            len = 1;
-                            break;
-
-                        case DEF_USB_GET_PROTOCOL: /* 0x03: GET_PROTOCOL */     //主机想获得HID设备当前所使用的协议
-                            U2EP0_Databuf[0] = U2Report_Value[pU2SetupReqPak->wIndex];
-                            len = 1;
-                            break;
-
-                        default:
-                            errflag = 0xFF;
-                    }
-                }
-            }
-            else    //判断为标准请求
-            {
-                switch(U2SetupReqCode)    //判断命令的序号
-                {
-                    case USB_GET_DESCRIPTOR:    //主机想获得标准描述符
-                    {
-                        printf("U2 USB_GET_DESCRIPTOR 2\n");
-                        switch(((pU2SetupReqPak->wValue) >> 8))   //右移8位，看原来的高8位是否为0，为1表示方向为IN方向，则进s-case语句
-                        {
-                            case USB_DESCR_TYP_DEVICE:  //不同的值代表不同的命令。主机想获得设备描述符
-                            {
-                                U2pDescr = U2MyDevDescr;    //将设备描述符字符串放在pDescr地址中，“获得标准描述符”这个case末尾会用拷贝函数发送
-                                len = U2MyDevDescr[0];    //协议规定设备描述符的首字节存放字节数长度。拷贝函数会用到len参数
-                            }
-                            break;
-
-                            case USB_DESCR_TYP_CONFIG:  //主机想获得配置描述符
-                            {
-                                U2pDescr = U2MyCfgDescr;    //将配置描述符字符串放在pDescr地址中，之后会发送
-                                len = U2MyCfgDescr[2];    //协议规定配置描述符的第三个字节存放配置信息的总长
-                            }
-                            break;
-
-                            case USB_DESCR_TYP_HID:     //主机想获得人机接口类描述符。此处结构体中的wIndex与配置描述符不同，意为接口号。
-                                switch((pU2SetupReqPak->wIndex) & 0xff)       //取低八位，高八位抹去
-                                {
-                                    /* 选择接口 */
-                                    case 0:
-                                        U2pDescr = (uint8_t *)(&U2MyCfgDescr[18]);  //接口1的类描述符存放位置，待发送
-                                        len = 9;
-                                        break;
-
-                                    default:
-                                        /* 不支持的字符串描述符 */
-                                        errflag = 0xff;
-                                        break;
-                                }
-                                break;
-
-                            case USB_DESCR_TYP_REPORT:  //主机想获得设备报表描述符
-                            {
-                                if(((pU2SetupReqPak->wIndex) & 0xff) == 0) //接口0报表描述符
-                                {
-                                    U2pDescr = HIDDescr; //数据准备上传
-                                    len = sizeof(HIDDescr);
-                                }
-                                else
-                                    len = 0xff; //本程序只有2个接口，这句话正常不可能执行
-                            }
-                            break;
-
-                            case USB_DESCR_TYP_STRING:  //主机想获得设备字符串描述符
-                            {
-                                switch((pU2SetupReqPak->wValue) & 0xff)   //根据wValue的值传递字符串信息
-                                {
-                                    case 1:
-                                        U2pDescr = MyManuInfo;
-                                        len = MyManuInfo[0];
-                                        break;
-                                    case 2:
-                                        U2pDescr = U2MyProdInfo;
-                                        len = U2MyProdInfo[0];
-                                        break;
-                                    case 0:
-                                        U2pDescr = MyLangDescr;
-                                        len = MyLangDescr[0];
-                                        break;
-                                    default:
-                                        errflag = 0xFF; // 不支持的字符串描述符
-                                        break;
-                                }
-                            }
-                            break;
-
-                            default:
-                                errflag = 0xff;
-                                break;
-                        }
-                        if(U2SetupReqLen > len)
-                            U2SetupReqLen = len;      //实际需上传总长度
-                        len = (U2SetupReqLen >= U2DevEP0SIZE) ? U2DevEP0SIZE : U2SetupReqLen;   //最大长度为64字节
-                        memcpy(pU2EP0_DataBuf,U2pDescr, len);  //拷贝函数
-                        U2pDescr += len;
-                    }
-                    break;
-
-                    case USB_SET_ADDRESS:       //主机想设置设备地址
-                        printf("U2 USB_SET_ADDRESS 2\n");
-                        U2SetupReqLen = (pU2SetupReqPak->wValue) & 0xff;    //将主机分发的位设备地址暂存在SetupReqLen中
-                        break;                                          //控制阶段会赋值给设备地址参数
-
-                    case USB_GET_CONFIGURATION: //主机想获得设备当前配置
-                        pU2EP0_DataBuf[0] = U2DevConfig;    //将设备配置放进RAM
-                        if(U2SetupReqLen > 1)
-                            U2SetupReqLen = 1;    //将数据阶段的字节数置1。因为DevConfig只有一个字节
-                        break;
-
-                    case USB_SET_CONFIGURATION: //主机想设置设备当前配置
-                        U2DevConfig = (pU2SetupReqPak->wValue) & 0xff;  //取低八位，高八位抹去
-                        break;
-
-                    case USB_CLEAR_FEATURE:     //关闭USB设备的特征/功能。可以是设备或是端点层面上的。
-                    {
-                        if((pU2SetupReqPak->bRequestType & USB_REQ_RECIP_MASK) == USB_REQ_RECIP_ENDP) //判断是不是端点特征（清除端点停止工作的状态）
-                        {
-                            switch((pU2SetupReqPak->wIndex) & 0xff)   //取低八位，高八位抹去。判断索引
-                            {       //16位的最高位判断数据传输方向，0为OUT，1为IN。低位为端点号。
-                                case 0x81:      //清零_TOG和_T_RES这三位，并将后者写成_NAK，响应IN事务NAK表示无数据返回
-                                    R8_U2EP1_CTRL = (R8_U2EP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK;
-                                    break;
-                                case 0x01:      //清零_TOG和_R_RES这三位，并将后者写成_ACK，响应OUT事务ACK表示接收正常
-                                    R8_U2EP1_CTRL = (R8_U2EP1_CTRL & ~(RB_UEP_R_TOG | MASK_UEP_R_RES)) | UEP_R_RES_ACK;
-                                    break;
-                                default:
-                                    errflag = 0xFF; // 不支持的端点
-                                    break;
-                            }
-                        }
-                        else if((pU2SetupReqPak->bRequestType & USB_REQ_RECIP_MASK) == USB_REQ_RECIP_DEVICE)  //判断是不是设备特征（用于设备唤醒）
-                        {
-                            if(pU2SetupReqPak->wValue == 1)   //唤醒标志位为1
-                            {
-                                U2USB_SleepStatus &= ~0x01;   //最低位清零
-                            }
-                        }
-                        else
-                        {
-                            errflag = 0xFF;
-                        }
-                    }
-                    break;
-
-                    case USB_SET_FEATURE:       //开启USB设备的特征/功能。可以是设备或是端点层面上的。
-                        if((pU2SetupReqPak->bRequestType & USB_REQ_RECIP_MASK) == USB_REQ_RECIP_ENDP) //判断是不是端点特征（使端点停止工作）
-                        {
-                            /* 端点 */
-                            switch(pU2SetupReqPak->wIndex)    //判断索引
-                            {       //16位的最高位判断数据传输方向，0为OUT，1为IN。低位为端点号。
-                                case 0x81:      //清零_TOG和_T_RES三位，并将后者写成_STALL，根据主机指令停止端点的工作
-                                    R8_U2EP1_CTRL = (R8_U2EP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_STALL;
-                                    break;
-                                case 0x01:      //清零_TOG和_R_RES三位，并将后者写成_STALL，根据主机指令停止端点的工作
-                                    R8_U2EP1_CTRL = (R8_U2EP1_CTRL & ~(RB_UEP_R_TOG | MASK_UEP_R_RES)) | UEP_R_RES_STALL;
-                                    break;
-                                default:
-                                    /* 不支持的端点 */
-                                    errflag = 0xFF; // 不支持的端点
-                                    break;
-                            }
-                        }
-                        else if((pU2SetupReqPak->bRequestType & USB_REQ_RECIP_MASK) == USB_REQ_RECIP_DEVICE)  //判断是不是设备特征（使设备休眠）
-                        {
-                            if(pU2SetupReqPak->wValue == 1)
-                            {
-                                U2USB_SleepStatus |= 0x01;    //设置睡眠
-                            }
-                        }
-                        else
-                        {
-                            errflag = 0xFF;
-                        }
-                        break;
-
-                    case USB_GET_INTERFACE:     //主机想获得接口当前工作的选择设置值
-                        pU2EP0_DataBuf[0] = 0x00;
-                        if(U2SetupReqLen > 1)
-                            U2SetupReqLen = 1;    //将数据阶段的字节数置1。因为待传数据只有一个字节
-                        break;
-
-                    case USB_SET_INTERFACE:     //主机想激活设备的某个接口
-                        break;
-
-                    case USB_GET_STATUS:        //主机想获得设备、接口或是端点的状态
-                        if((pU2SetupReqPak->bRequestType & USB_REQ_RECIP_MASK) == USB_REQ_RECIP_ENDP) //判断是否为端点状态
-                        {
-                            /* 端点 */
-                            pU2EP0_DataBuf[0] = 0x00;
-                            switch(pU2SetupReqPak->wIndex)
-                            {       //16位的最高位判断数据传输方向，0为OUT，1为IN。低位为端点号。
-                                case 0x81:      //判断_TOG和_T_RES三位，若处于STALL状态，进if语句
-                                    if((R8_U2EP1_CTRL & (RB_UEP_T_TOG | MASK_UEP_T_RES)) == UEP_T_RES_STALL)
-                                    {
-                                        pU2EP0_DataBuf[0] = 0x01; //返回D0为1，表示端点被停止工作了。该位由SET_FEATURE和CLEAR_FEATURE命令配置。
-                                    }
-                                    break;
-
-                                case 0x01:      //判断_TOG和_R_RES三位，若处于STALL状态，进if语句
-                                    if((R8_U2EP1_CTRL & (RB_UEP_R_TOG | MASK_UEP_R_RES)) == UEP_R_RES_STALL)
-                                    {
-                                        pU2EP0_DataBuf[0] = 0x01;
-                                    }
-                                    break;
-                            }
-                        }
-                        else if((pU2SetupReqPak->bRequestType & USB_REQ_RECIP_MASK) == USB_REQ_RECIP_DEVICE)  //判断是否为设备状态
-                        {
-                            pU2EP0_DataBuf[0] = 0x00;
-                            if(U2USB_SleepStatus)     //如果设备处于睡眠状态
-                            {
-                                pU2EP0_DataBuf[0] = 0x02;     //最低位D0为0，表示设备由总线供电，为1表示设备自供电。 D1位为1表示支持远程唤醒，为0表示不支持。
-                            }
-                            else
-                            {
-                                pU2EP0_DataBuf[0] = 0x00;
-                            }
-                        }
-                        pU2EP0_DataBuf[1] = 0;    //返回状态信息的格式为16位数，高八位保留为0
-                        if(U2SetupReqLen >= 2)
-                        {
-                            U2SetupReqLen = 2;    //将数据阶段的字节数置2。因为待传数据只有2个字节
-                        }
-                        break;
-
-                    default:
-                        errflag = 0xff;
-                        break;
-                }
-            }
-            if(errflag == 0xff) // 错误或不支持
-            {
-                //                  SetupReqCode = 0xFF;
-                R8_U2EP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_STALL | UEP_T_RES_STALL; // STALL
-                U2Ready = 1;
-                PRINT("U2Ready_Stall = %d\n",U2Ready);
-            }
-            else
-            {
-                if(chtype & 0x80)   // 上传。最高位为1，数据传输方向为设备向主机传输。
-                {
-                    len = (U2SetupReqLen > U2DevEP0SIZE) ? U2DevEP0SIZE : U2SetupReqLen;
-                    U2SetupReqLen -= len;
-                }
-                else
-                    len = 0;        // 下传。最高位为0，数据传输方向为主机向设备传输。
-                R8_U2EP0_T_LEN = len;
-                R8_U2EP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_ACK | UEP_T_RES_ACK;     // 默认数据包是DATA1
-            }
-
-            R8_USB2_INT_FG = RB_UIF_TRANSFER;    //写1清中断标识
-        }
-        //printf("U2 USB2_DevTransProcess 4\n");
-    }
-
-
-    else if(intflag & RB_UIF_BUS_RST)   //判断_INT_FG中的总线复位标志位，为1触发
-    {
-        R8_USB2_DEV_AD = 0;      //设备地址写成0，待主机重新分配给设备一个新地址
-        R8_U2EP0_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;   //把端点0的控制寄存器，写成：接收响应响应ACK表示正常收到，发送响应NAK表示没有数据要返回
-        R8_U2EP1_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;
-        R8_U2EP2_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;
-        R8_U2EP3_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;
-        R8_USB2_INT_FG = RB_UIF_BUS_RST; //写1清中断标识
-    }
-    else if(intflag & RB_UIF_SUSPEND)   //判断_INT_FG中的总线挂起或唤醒事件中断标志位。挂起和唤醒都会触发此中断
-    {
-        if(R8_USB2_MIS_ST & RB_UMS_SUSPEND)  //取得杂项状态寄存器中的挂起状态位，为1表示USB总线处于挂起态，为0表示总线处于非挂起态
-        {
-            U2Ready = 0;
-            PRINT("U2Ready_Sleep = %d\n",U2Ready);
-        } // 挂起     //当设备处于空闲状态超过3ms，主机会要求设备挂起（类似于电脑休眠）
-        else    //挂起或唤醒中断被触发，又没有被判断为挂起
-        {
-            U2Ready = 1;
-            PRINT("U2Ready_WeakUp = %d\n",U2Ready);
-        } // 唤醒
-        R8_USB2_INT_FG = RB_UIF_SUSPEND; //写1清中断标志
-    }
-    else
-    {
-        R8_USB2_INT_FG = intflag;    //_INT_FG中没有中断标识，再把原值写回原来的寄存器
-        printf("U2 USB2_DevTransProcess 5\n");
-    }
-}
-
-/*********************************************************************
- * @fn      U2DevHIDReport
- *
- * @brief   上报HID数据
- *
- * @return  0：成功
- *          1：出错
- */
-void U2DevHIDReport(void)
-{
-    memcpy(pU2EP1_IN_DataBuf, U2HID_Buf, U2HID_MsgLen);
-    U2DevEP1_IN_Deal(U2HID_MsgLen);
-}
-
-/*********************************************************************
- * @fn      U2DevWakeup
- *
- * @brief   设备模式唤醒主机
- *
- * @return  none
- */
-void U2DevWakeup(void)
-{
-    R16_PIN_ANALOG_IE &= ~(RB_PIN_USB2_DP_PU);
-    R8_U2DEV_CTRL |= RB_UD_LOW_SPEED;
-    mDelaymS(2);
-    R8_U2DEV_CTRL &= ~RB_UD_LOW_SPEED;
-    R16_PIN_ANALOG_IE |= RB_PIN_USB2_DP_PU;
-}
 /*********************************************************************
  * @fn      DebugInit
  *
@@ -1020,24 +555,15 @@ int main()
     DelayMs(100);
     GPIOPinRemap(ENABLE,RB_PIN_I2C);
     IIC_Init();            //端口初始化
-    //CH58X_SPI_INIT_W25Qx();
+    CH58X_SPI_INIT_W25Qx(); //先初始化SPI EEPROM
     
     DebugInit();        //配置串口1用来prinft来debug
-    printf("start,%d\n",1);
-    int result = 0;
-    char resultstr[257]="";
-    char result1[32]="";
-    result = fatfs_test();
-    fatfs_test_str(resultstr);
-    sprintf(result1,"fatfs_test:%d",result);
 
-    uint8_t id[2]={0x0,0x0};
-    int x=0;
-    char tempstr[255]="";
-    BSP_W25Qx_Read_ID(id);
+    //uint8_t id[2]={0x0,0x0};
+    //BSP_W25Qx_Read_ID(id);
     
-    
-    printf("start,w25id:%x,%x\n",id[0],id[1]);
+    //printf("start,%d\n",1);
+    //printf("start,w25id:%x,%x\n",id[0],id[1]);
     //UART1_SendString("start\n", sizeof("start\n"));
     pEP0_RAM_Addr = EP0_Databuf;    //配置缓存区64字节。
     pEP1_RAM_Addr = EP1_Databuf;
@@ -1059,62 +585,64 @@ int main()
     u8g2_InitDisplay(&u8g2);      // 根据所选的芯片进行初始化工作，初始化完成后，显示器处于关闭状态
     u8g2_SetPowerSave(&u8g2, 0);  // 打开显示器
     u8g2_ClearBuffer(&u8g2);
-    u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
-    sprintf(tempstr,"W25ID:0x%X%X",id[0],id[1]);
-    displayBuffer=malloc(255*sizeof(char));
-    update_temp(-30.48);
-    displayPos[0]=0;
-    displayPos[1]=37;
-    /*
-    // TODO: SPI FLASH 写入测试
-    uint8_t W25Q64_Buffer[4]={0xff,0xff,0xff,0xff};
-    uint8_t W25Q64_Buffer_Read[4]={0xff,0xff,0xff,0xff};
-    char Wtempstr[32]="";
-    char Rtempstr[32]="";
-    BSP_W25Qx_Read(W25Q64_Buffer,0,4);
-    */
+    FontInfo *fonts = NULL;
+    uint8_t font_count = 0;
+    TextInfo *texts = NULL;
+    uint8_t text_count = 0;
+    //u8g2_SetFont(&u8g2, myfont2_lite);
+    BOOL use_ext_font=FALSE;
+    if(parse_packet_file_lite((void *)NULL,dataflash_read_cb, &fonts, &font_count, &texts, &text_count) != 0) {
+        printf("Failed to initialize program, using internal.\n");
+    }
+    if(font_count>0){
+        if (u8g2_InitExternalFont(&u8g2, (void *)NULL, dataflash_read_cb)) {
+            font_offset=fonts[0].offset+7;
+            max_size=font_offset+fonts[0].count;
+            if (u8g2_SetExternalFont(&u8g2, font_offset)) {
+                printf("External font loaded successfully\n");
+                use_ext_font=TRUE;
+            } else {
+                printf("Failed to set external font, using internal font\n");
+                u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
+            }
+        } else {
+            printf("Failed to initialize external font, using internal font\n");
+            u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
+        }
+    }else{
+        u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
+    }
     while(1){
         /*
-        if(W25Q64_Buffer[0]==0xff)
-            W25Q64_Buffer[0]=0;
-        if(W25Q64_Buffer[1]==0xff)
-            W25Q64_Buffer[1]=1;
-        if(W25Q64_Buffer[2]==0xff)
-            W25Q64_Buffer[2]=2;
-        if(W25Q64_Buffer[3]==0xff)
-            W25Q64_Buffer[3]=3;
-        W25Q64_Buffer[0]++;
-        W25Q64_Buffer[1]++;
-        W25Q64_Buffer[2]++;
-        W25Q64_Buffer[3]++;
-        BSP_W25Qx_Erase_Block(0);
-        BSP_W25Qx_Write(W25Q64_Buffer,0,4);
-        BSP_W25Qx_Read(W25Q64_Buffer_Read,0,4);
-        sprintf(Wtempstr,"W: %02X %02X %02X %02X",W25Q64_Buffer[0],W25Q64_Buffer[1],W25Q64_Buffer[2],W25Q64_Buffer[3]);
-        sprintf(Rtempstr,"R: %02X %02X %02X %02X",W25Q64_Buffer_Read[0],W25Q64_Buffer_Read[1],W25Q64_Buffer_Read[2],W25Q64_Buffer_Read[3]);
-        */
-        u8g2_ClearBuffer(&u8g2);
-        u8g2_DrawStr(&u8g2, 0, 12, "Hello, USB Display!");
-        u8g2_DrawStr(&u8g2, 0, 25, tempstr);
-        u8g2_DrawStr(&u8g2, 0, 48, result1);
-        u8g2_DrawStr(&u8g2, 0, 61, resultstr);
-        /*
-        u8g2_DrawStr(&u8g2, 0, 48, Wtempstr);
-        u8g2_DrawStr(&u8g2, 0, 61, Rtempstr);
-        */
+        u8g2_DrawUTF8(&u8g2, 5, 28, use_ext_font?"你好":"Hello, u8g2!");
         u8g2_SendBuffer(&u8g2);
-        /*
-        u8g2_DrawStr(&u8g2, 0, 48, "CPU: 18% MEM: 77%");
-        u8g2_DrawStr(&u8g2, 0, 61, "U:0.34 KB/s D:0.06 KB/s");
-        if(strlen(displayBuffer)>0){
-            u8g2_DrawStr(&u8g2, displayPos[0], displayPos[1], displayBuffer);
-        }
-        u8g2_SendBuffer(&u8g2);
-        refresh_temp_str(displayBuffer);
-        sprintf(tempstr,"W25ID:0x%X%X %d",id[0],id[1],x);
-        x++;
-        */
         DelayMs(1000);
+        */
+        u8g2_FirstPage(&u8g2);
+        do
+        {
+        if(text_count>0 && use_ext_font){
+            for (int i = 0; i < text_count; i++) {
+            if(text_count>0 && texts[i].style_font != current_font_index){
+                font_offset=fonts[(texts[i].style_font & 0xF)-1].offset+7;
+                max_size = font_offset+fonts[(texts[i].style_font & 0xF)-1].count;
+                current_font_index=(texts[i].style_font & 0xF);
+                u8g2_SetExternalFont(&u8g2, font_offset);
+                printf("current_font_index=%x,font_offset=%x,max_size=%x\n",current_font_index,font_offset,max_size);
+            }
+            if (texts[i].category >= 0x11 && texts[i].category <= 0x1F) {
+                uint8_t slot = texts[i].category - 0x11;
+                char fmt_buf[128];
+                format_dynamic_text(texts[i].text, &variant_slots[slot], fmt_buf, sizeof(fmt_buf));
+                u8g2_DrawUTF8(&u8g2, texts[i].x, texts[i].y, fmt_buf);
+            } else {
+                u8g2_DrawUTF8(&u8g2, texts[i].x, texts[i].y, texts[i].text);
+            }
+            }
+        }else{
+            u8g2_DrawUTF8(&u8g2, 2, 28, "Example Program");
+        }
+        } while (u8g2_NextPage(&u8g2));
     }
 
 }
@@ -1147,12 +675,14 @@ void DevEP1_OUT_Deal(uint8_t l)
         uint8_t *resp_data=NULL;
         uint8_t resp_data_length=0;
         int ret=-1;
-        print_hex("port data",pEP1_OUT_DataBuf,l);
+        //print_hex("port data",pEP1_OUT_DataBuf,l);
         ret=parse_data(pEP1_OUT_DataBuf,l,0,&resp_data,&resp_data_length);
-        printf("parse_data:ret=%d,resp_data_length=%d\n",ret,resp_data_length);
-        print_hex("parse_data:resp_data",resp_data,resp_data_length);
+        //printf("parse_data:ret=%d,resp_data_length=%d\n",ret,resp_data_length);
+        //print_hex("parse_data:resp_data",resp_data,resp_data_length);
         memset(pEP1_IN_DataBuf,0,64);
         memcpy(pEP1_IN_DataBuf,resp_data,resp_data_length);
+        free(resp_data);
+        resp_data=NULL;
         DevEP1_IN_Deal(64);
     }
     // TODO: Recv Data
@@ -1171,57 +701,4 @@ __attribute__((section(".highcode")))
 void USB_IRQHandler(void) /* USB中断服务程序,使用寄存器组1 */
 {
     USB_DevTransProcess();
-}
-
-/*********************************************************************
- * @fn      U2DevEP1_OUT_Deal
- *
- * @brief   端点1数据处理，收到数据后取反再发出去。用户自行更改。
- *
- * @return  none
- */
-void U2DevEP1_OUT_Deal(uint8_t l)
-{ /* 用户可自定义 */
-    /*
-    uint8_t i;
-
-    for(i = 0; i < l; i++)
-    {
-        pU2EP1_IN_DataBuf[i] = pU2EP1_OUT_DataBuf[i];
-    }
-    U2DevEP1_IN_Deal(l);
-   // 这里将数据复制到设备1的EP1
-   if(Ready)
-    {
-        memcpy(pEP1_IN_DataBuf,pU2EP1_OUT_DataBuf,l);
-        DevEP1_IN_Deal(l);
-    }
-    */
-    if(*(pU2EP1_OUT_DataBuf)==MAGIC_CODE_1 || *(pU2EP1_OUT_DataBuf+1)==MAGIC_CODE_2){
-        uint8_t *resp_data=NULL;
-        uint8_t resp_data_length=0;
-        int ret=-1;
-        print_hex("usb 2port data",pU2EP1_OUT_DataBuf,l);
-        ret=parse_data(pU2EP1_OUT_DataBuf,l,0,&resp_data,&resp_data_length);
-        printf("parse_data:ret=%d,resp_data_length=%d\n",ret,resp_data_length);
-        print_hex("parse_data:resp_data",resp_data,resp_data_length);
-        memset(pU2EP1_IN_DataBuf,0,64);
-        memcpy(pU2EP1_IN_DataBuf,resp_data,resp_data_length);
-        U2DevEP1_IN_Deal(64);
-    }
-}
-
-
-/*********************************************************************
- * @fn      USB2_IRQHandler
- *
- * @brief   USB中断函数
- *
- * @return  none
- */
-__INTERRUPT
-__HIGH_CODE
-void USB2_IRQHandler(void) /* USB中断服务程序,使用寄存器组1 */
-{
-    USB2_DevTransProcess();
 }
