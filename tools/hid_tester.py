@@ -2,9 +2,22 @@
 """CH582 USB HID 测试工具"""
 
 import struct
+import threading
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, filedialog
 import hid
+
+# SPI Flash 芯片 ID 查找表
+# 固件使用 READ_ID (0x90) 命令，返回 2 字节: [manufacturer_id, device_id]
+# device_id 即容量编码: 0x14=8Mbit, 0x15=16Mbit, 0x16=32Mbit, 0x17=64Mbit, 0x18=128Mbit, 0x19=256Mbit
+W25Q_CHIP_TABLE = {
+    0xEF: {  # Winbond
+        0x16: ("W25Q64",   8 * 1024 * 1024),      # 8MB
+    },
+}
+
+# DataFlash 大小
+DATAFLASH_SIZE = 0x8000  # 32KB
 
 # ─── 协议常量 ───
 MAGIC = [0x44, 0x47]  # 'D', 'G'
@@ -121,6 +134,20 @@ def hexdump(data, prefix=""):
         ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
         lines.append(f"{prefix}{i:04X}: {hex_str:<48s}  {ascii_str}")
     return '\n'.join(lines)
+
+
+def lookup_spi_chip(id_bytes):
+    """从 READ_ID 返回的字节查找芯片型号和大小。
+    id_bytes 格式: [manufacturer_id, device_id, 0, 0]
+    返回 (chip_name, size_bytes) 或 (None, None)。"""
+    if len(id_bytes) < 2:
+        return None, None
+    mfr, dev_id = id_bytes[0], id_bytes[1]
+    if mfr in W25Q_CHIP_TABLE:
+        chips = W25Q_CHIP_TABLE[mfr]
+        if dev_id in chips:
+            return chips[dev_id]
+    return f"未知(mfr=0x{mfr:02X},dev=0x{dev_id:02X})", None
 
 
 class HIDProtocol:
@@ -552,9 +579,53 @@ class HIDTesterGUI:
         row3.pack(fill='x', pady=5)
         ttk.Button(row3, text="全部擦除 (0x0000~0x8000)", command=self.on_df_erase).pack(side='left')
 
+        row4 = ttk.Frame(tab)
+        row4.pack(fill='x', pady=5)
+        ttk.Button(row4, text="完整读取 (32KB)", command=self.on_df_read_all).pack(side='left')
+        ttk.Button(row4, text="保存到文件", command=self.on_df_save_to_file).pack(side='left', padx=5)
+        self.df_progress = ttk.Progressbar(row4, length=200, mode='determinate')
+        self.df_progress.pack(side='left', padx=5)
+        self.df_progress_label = tk.StringVar(value="")
+        ttk.Label(row4, textvariable=self.df_progress_label).pack(side='left')
+
+        # 完整写入区域
+        sep = ttk.Separator(tab, orient='horizontal')
+        sep.pack(fill='x', pady=8)
+
+        row5 = ttk.Frame(tab)
+        row5.pack(fill='x', pady=5)
+        ttk.Label(row5, text="从文件完整写入:", font=('', 10, 'bold')).pack(side='left')
+
+        row6 = ttk.Frame(tab)
+        row6.pack(fill='x', pady=3)
+        ttk.Label(row6, text="文件:").pack(side='left')
+        self.df_write_file = tk.StringVar()
+        ttk.Entry(row6, textvariable=self.df_write_file, width=40, state='readonly').pack(side='left', padx=5)
+        ttk.Button(row6, text="选择文件...", command=self._on_df_choose_file).pack(side='left')
+
+        row7 = ttk.Frame(tab)
+        row7.pack(fill='x', pady=3)
+        self.df_opt_backup = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row7, text="写入前备份旧数据", variable=self.df_opt_backup).pack(side='left')
+        self.df_opt_erase = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row7, text="完整擦除 (否则只擦除写入区域)", variable=self.df_opt_erase).pack(side='left', padx=15)
+        self.df_opt_verify = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row7, text="写入后校验", variable=self.df_opt_verify).pack(side='left', padx=15)
+
+        row8 = ttk.Frame(tab)
+        row8.pack(fill='x', pady=5)
+        ttk.Button(row8, text="完整写入", command=self.on_df_write_all).pack(side='left')
+        self.df_write_progress = ttk.Progressbar(row8, length=200, mode='determinate')
+        self.df_write_progress.pack(side='left', padx=5)
+        self.df_write_progress_label = tk.StringVar(value="")
+        ttk.Label(row8, textvariable=self.df_write_progress_label).pack(side='left')
+
         # 读取结果显示
-        self.df_result = scrolledtext.ScrolledText(tab, height=8, font=('Consolas', 9))
+        self.df_result = scrolledtext.ScrolledText(tab, height=6, font=('Consolas', 9))
         self.df_result.pack(fill='both', expand=True, pady=5)
+
+        # 完整读取的数据缓存
+        self._df_full_data = None
 
     def on_df_read(self):
         if not self._check_conn():
@@ -589,6 +660,186 @@ class HIDTesterGUI:
             self.log(f"DataFlash 擦除失败: {err}")
         else:
             self.log(f"DataFlash 全部擦除 → {STATUS_NAMES.get(status, '?')}")
+
+    def on_df_read_all(self):
+        if not self._check_conn():
+            return
+        self.df_progress['value'] = 0
+        self.df_progress['maximum'] = DATAFLASH_SIZE
+        self.df_progress_label.set("0%")
+        self.log(f"DataFlash 完整读取开始 (0x0000~0x{DATAFLASH_SIZE:04X}, {DATAFLASH_SIZE} bytes)")
+        threading.Thread(target=self._df_read_all_thread, daemon=True).start()
+
+    def _df_read_all_thread(self):
+        total = DATAFLASH_SIZE
+        chunk_size = 52
+        buf = bytearray()
+        for offset in range(0, total, chunk_size):
+            n = min(chunk_size, total - offset)
+            data, err = self.proto.dataflash_read(offset, n)
+            if err:
+                self.root.after(0, self._df_read_all_done, None, f"读取失败 @ 0x{offset:04X}: {err}")
+                return
+            buf.extend(data)
+            pct = len(buf) * 100 // total
+            self.root.after(0, self._df_read_all_progress, pct)
+        self.root.after(0, self._df_read_all_done, bytes(buf), None)
+
+    def _df_read_all_progress(self, pct):
+        self.df_progress['value'] = DATAFLASH_SIZE * pct // 100
+        self.df_progress_label.set(f"{pct}%")
+
+    def _df_read_all_done(self, data, err):
+        if err:
+            self.log(f"DataFlash {err}")
+            self.df_progress_label.set("失败")
+            return
+        self._df_full_data = data
+        self.df_progress['value'] = DATAFLASH_SIZE
+        self.df_progress_label.set("完成")
+        self.log(f"DataFlash 完整读取完成 ({len(data)} bytes)")
+        self.df_result.delete('1.0', 'end')
+        self.df_result.insert('1.0', hexdump(data))
+
+    def on_df_save_to_file(self):
+        if self._df_full_data is None:
+            self.log("请先执行完整读取")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".bin",
+            filetypes=[("Binary", "*.bin"), ("All Files", "*.*")],
+            title="保存 DataFlash 数据"
+        )
+        if path:
+            with open(path, 'wb') as f:
+                f.write(self._df_full_data)
+            self.log(f"DataFlash 数据已保存到: {path} ({len(self._df_full_data)} bytes)")
+
+    def _on_df_choose_file(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Binary", "*.bin"), ("All Files", "*.*")],
+            title="选择 DataFlash 镜像文件"
+        )
+        if path:
+            # 校验文件大小
+            import os
+            fsize = os.path.getsize(path)
+            if fsize > DATAFLASH_SIZE:
+                self.log(f"文件大小 ({fsize} bytes = 0x{fsize:04X}) 超过 DataFlash 容量 ({DATAFLASH_SIZE} bytes)，操作取消")
+                tk.messagebox.showwarning("文件过大",
+                    f"文件大小: {fsize} bytes (0x{fsize:04X})\n"
+                    f"DataFlash 容量: {DATAFLASH_SIZE} bytes (0x{DATAFLASH_SIZE:04X})\n\n"
+                    f"文件超出容量 {fsize - DATAFLASH_SIZE} bytes，无法写入。")
+                return
+            self.df_write_file.set(path)
+            self.log(f"已选择文件: {path} ({fsize} bytes)")
+
+    def on_df_write_all(self):
+        if not self._check_conn():
+            return
+        path = self.df_write_file.get()
+        if not path:
+            self.log("请先选择文件")
+            return
+        with open(path, 'rb') as f:
+            file_data = f.read()
+        if len(file_data) > DATAFLASH_SIZE:
+            self.log(f"文件过大 ({len(file_data)} > {DATAFLASH_SIZE})，取消写入")
+            return
+        if len(file_data) == 0:
+            self.log("文件为空，取消写入")
+            return
+        # 对齐到 256 字节页
+        padded = file_data + b'\xFF' * ((256 - len(file_data) % 256) % 256)
+        do_backup = self.df_opt_backup.get()
+        do_erase = self.df_opt_erase.get()
+        do_verify = self.df_opt_verify.get()
+        self.df_write_progress['value'] = 0
+        self.df_write_progress['maximum'] = 100
+        self.df_write_progress_label.set("0%")
+        self.log(f"DataFlash 完整写入开始: {len(file_data)} bytes (填充至 {len(padded)} bytes)")
+        threading.Thread(target=self._df_write_all_thread,
+                         args=(padded, do_backup, do_erase, do_verify),
+                         daemon=True).start()
+
+    def _df_write_all_thread(self, data, do_backup, do_erase, do_verify):
+        total = len(data)
+        chunk_size = 52
+
+        # Step 1: 备份
+        if do_backup:
+            self.root.after(0, self._df_write_progress_update, 0, "备份中...")
+            backup = bytearray()
+            for offset in range(0, total, chunk_size):
+                n = min(chunk_size, total - offset)
+                chunk, err = self.proto.dataflash_read(offset, n)
+                if err:
+                    self.root.after(0, self._df_write_all_done, False, f"备份读取失败 @ 0x{offset:04X}: {err}")
+                    return
+                backup.extend(chunk)
+            self.root.after(0, self.log, f"DataFlash 备份完成 ({len(backup)} bytes)")
+
+        # Step 2: 擦除
+        if do_erase:
+            self.root.after(0, self._df_write_progress_update, 0, "擦除中...")
+            _, err = self.proto.dataflash_erase_all()
+            if err:
+                self.root.after(0, self._df_write_all_done, False, f"擦除失败: {err}")
+                return
+            self.root.after(0, self.log, "DataFlash 擦除完成")
+
+        # Step 3: 写入
+        self.root.after(0, self._df_write_progress_update, 0, "写入中...")
+        for offset in range(0, total, chunk_size):
+            n = min(chunk_size, total - offset)
+            chunk = data[offset:offset + n]
+            _, err = self.proto.dataflash_write(offset, chunk)
+            if err:
+                self.root.after(0, self._df_write_all_done, False, f"写入失败 @ 0x{offset:04X}: {err}")
+                return
+            pct = (offset + n) * 50 // total
+            self.root.after(0, self._df_write_progress_update, pct, None)
+
+        # Step 4: 校验
+        if do_verify:
+            self.root.after(0, self._df_write_progress_update, 50, "校验中...")
+            for offset in range(0, total, chunk_size):
+                n = min(chunk_size, total - offset)
+                chunk, err = self.proto.dataflash_read(offset, n)
+                if err:
+                    self.root.after(0, self._df_write_all_done, False, f"校验读取失败 @ 0x{offset:04X}: {err}")
+                    return
+                if chunk != data[offset:offset + n]:
+                    self.root.after(0, self._df_write_all_done, False,
+                                    f"校验失败 @ 0x{offset:04X}: 数据不匹配")
+                    return
+                pct = 50 + (offset + n) * 50 // total
+                self.root.after(0, self._df_write_progress_update, pct, None)
+
+        self.root.after(0, self._df_write_all_done, True, None)
+
+    def _df_write_progress_update(self, pct, msg):
+        if pct is not None:
+            self.df_write_progress['value'] = pct
+        if msg:
+            self.df_write_progress_label.set(msg)
+        else:
+            cur = self.df_write_progress_label.get()
+            # 只更新百分比部分
+            if '%' in cur and ' ' in cur:
+                stage = cur.split(' ')[0]
+                self.df_write_progress_label.set(f"{stage} {pct}%")
+            else:
+                self.df_write_progress_label.set(f"{pct}%")
+
+    def _df_write_all_done(self, _success, err):
+        if err:
+            self.log(f"DataFlash 完整写入失败: {err}")
+            self.df_write_progress_label.set("失败")
+            return
+        self.df_write_progress['value'] = 100
+        self.df_write_progress_label.set("完成")
+        self.log("DataFlash 完整写入成功")
 
     # ─── Tab: SPI Flash ───
     def _build_tab_spi(self):
@@ -626,9 +877,54 @@ class HIDTesterGUI:
         ttk.Entry(row3, textvariable=self.spi_block_offset, width=14).pack(side='left', padx=5)
         ttk.Button(row3, text="擦除 4KB 块", command=self.on_spi_erase_block).pack(side='left', padx=5)
 
+        row4 = ttk.Frame(tab)
+        row4.pack(fill='x', pady=5)
+        ttk.Button(row4, text="完整读取", command=self.on_spi_read_all).pack(side='left')
+        ttk.Button(row4, text="保存到文件", command=self.on_spi_save_to_file).pack(side='left', padx=5)
+        self.spi_progress = ttk.Progressbar(row4, length=200, mode='determinate')
+        self.spi_progress.pack(side='left', padx=5)
+        self.spi_progress_label = tk.StringVar(value="")
+        ttk.Label(row4, textvariable=self.spi_progress_label).pack(side='left')
+
+        # 完整写入区域
+        sep = ttk.Separator(tab, orient='horizontal')
+        sep.pack(fill='x', pady=8)
+
+        row5 = ttk.Frame(tab)
+        row5.pack(fill='x', pady=5)
+        ttk.Label(row5, text="从文件完整写入:", font=('', 10, 'bold')).pack(side='left')
+
+        row6 = ttk.Frame(tab)
+        row6.pack(fill='x', pady=3)
+        ttk.Label(row6, text="文件:").pack(side='left')
+        self.spi_write_file = tk.StringVar()
+        ttk.Entry(row6, textvariable=self.spi_write_file, width=40, state='readonly').pack(side='left', padx=5)
+        ttk.Button(row6, text="选择文件...", command=self._on_spi_choose_file).pack(side='left')
+
+        row7 = ttk.Frame(tab)
+        row7.pack(fill='x', pady=3)
+        self.spi_opt_backup = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row7, text="写入前备份旧数据", variable=self.spi_opt_backup).pack(side='left')
+        self.spi_opt_erase = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row7, text="完整擦除 (否则只擦除写入区域)", variable=self.spi_opt_erase).pack(side='left', padx=15)
+        self.spi_opt_verify = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row7, text="写入后校验", variable=self.spi_opt_verify).pack(side='left', padx=15)
+
+        row8 = ttk.Frame(tab)
+        row8.pack(fill='x', pady=5)
+        ttk.Button(row8, text="完整写入", command=self.on_spi_write_all).pack(side='left')
+        self.spi_write_progress = ttk.Progressbar(row8, length=200, mode='determinate')
+        self.spi_write_progress.pack(side='left', padx=5)
+        self.spi_write_progress_label = tk.StringVar(value="")
+        ttk.Label(row8, textvariable=self.spi_write_progress_label).pack(side='left')
+
         # 读取结果显示
-        self.spi_result = scrolledtext.ScrolledText(tab, height=8, font=('Consolas', 9))
+        self.spi_result = scrolledtext.ScrolledText(tab, height=5, font=('Consolas', 9))
         self.spi_result.pack(fill='both', expand=True, pady=5)
+
+        # 完整读取的数据缓存及芯片大小
+        self._spi_full_data = None
+        self._spi_chip_size = None
 
     def on_spi_id(self):
         if not self._check_conn():
@@ -637,12 +933,24 @@ class HIDTesterGUI:
         if err:
             self.log(f"SPI ID 读取失败: {err}")
             self.spi_id_result.set(f"失败: {err}")
+            self._spi_chip_size = None
         else:
-            hex_str = []
-            for id in id_bytes:
-                hex_str.append(f"{hex(id)}")
-            self.log(f"SPI Flash ID: {" ".join(hex_str)}")
-            self.spi_id_result.set(" ".join(hex_str))
+            hex_str = ' '.join(f'0x{b:02X}' for b in id_bytes)
+            self.log(f"SPI Flash ID: {hex_str}")
+            chip_name, chip_size = lookup_spi_chip(id_bytes)
+            if chip_name and chip_size:
+                size_mb = chip_size / (1024 * 1024)
+                display = f"{chip_name} ({size_mb:.0f}MB) [{hex_str}]"
+                self._spi_chip_size = chip_size
+                self.log(f"识别芯片: {chip_name}, 容量: {size_mb:.0f}MB ({chip_size} bytes)")
+            elif chip_name:
+                display = f"{chip_name} [{hex_str}]"
+                self._spi_chip_size = None
+                self.log(f"未识别的芯片: {chip_name}，完整读取需要手动指定大小")
+            else:
+                display = f"[{hex_str}]"
+                self._spi_chip_size = None
+            self.spi_id_result.set(display)
 
     def on_spi_read(self):
         if not self._check_conn():
@@ -687,6 +995,241 @@ class HIDTesterGUI:
             self.log(f"SPI 块擦除失败: {err}")
         else:
             self.log(f"SPI 块擦除 0x{offset:08X} → {STATUS_NAMES.get(status, '?')}")
+
+    def on_spi_read_all(self):
+        if not self._check_conn():
+            return
+        # 先读取 ID 确定芯片大小
+        if self._spi_chip_size is None:
+            id_bytes, err = self.proto.spi_get_id()
+            if err:
+                self.log(f"SPI ID 读取失败: {err}")
+                return
+            chip_name, chip_size = lookup_spi_chip(id_bytes)
+            if not chip_size:
+                hex_str = ' '.join(f'0x{b:02X}' for b in id_bytes)
+                self.log(f"未识别的芯片 ID: {hex_str}，无法自动确定大小。请先点击'读取 Flash ID'确认芯片。")
+                return
+            self._spi_chip_size = chip_size
+            if chip_name:
+                size_mb = chip_size / (1024 * 1024)
+                self.spi_id_result.set(f"{chip_name} ({size_mb:.0f}MB)")
+                self.log(f"识别芯片: {chip_name}, 容量: {size_mb:.0f}MB")
+
+        total = self._spi_chip_size
+        self.spi_progress['value'] = 0
+        self.spi_progress['maximum'] = total
+        self.spi_progress_label.set("0%")
+        self.log(f"SPI Flash 完整读取开始 (0x00000000~0x{total:08X}, {total} bytes)")
+        threading.Thread(target=self._spi_read_all_thread, args=(total,), daemon=True).start()
+
+    def _spi_read_all_thread(self, total):
+        chunk_size = 52
+        buf = bytearray()
+        for offset in range(0, total, chunk_size):
+            n = min(chunk_size, total - offset)
+            data, err = self.proto.spi_read(offset, n)
+            if err:
+                self.root.after(0, self._spi_read_all_done, None, f"读取失败 @ 0x{offset:08X}: {err}")
+                return
+            buf.extend(data)
+            pct = len(buf) * 100 // total
+            self.root.after(0, self._spi_read_all_progress, total, pct)
+        self.root.after(0, self._spi_read_all_done, bytes(buf), None)
+
+    def _spi_read_all_progress(self, total, pct):
+        self.spi_progress['value'] = total * pct // 100
+        self.spi_progress_label.set(f"{pct}%")
+
+    def _spi_read_all_done(self, data, err):
+        if err:
+            self.log(f"SPI {err}")
+            self.spi_progress_label.set("失败")
+            return
+        self._spi_full_data = data
+        self.spi_progress['value'] = self._spi_chip_size
+        self.spi_progress_label.set("完成")
+        self.log(f"SPI Flash 完整读取完成 ({len(data)} bytes)")
+        self.spi_result.delete('1.0', 'end')
+        preview = min(4096, len(data))
+        self.spi_result.insert('1.0', hexdump(data[:preview]))
+        if len(data) > preview:
+            self.spi_result.insert('end', f"\n... 仅显示前 {preview} bytes (共 {len(data)} bytes)")
+
+    def on_spi_save_to_file(self):
+        if self._spi_full_data is None:
+            self.log("请先执行完整读取")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".bin",
+            filetypes=[("Binary", "*.bin"), ("All Files", "*.*")],
+            title="保存 SPI Flash 数据"
+        )
+        if path:
+            with open(path, 'wb') as f:
+                f.write(self._spi_full_data)
+            self.log(f"SPI Flash 数据已保存到: {path} ({len(self._spi_full_data)} bytes)")
+
+    def _ensure_spi_chip_size(self):
+        """确保已获取芯片大小，返回 chip_size 或 None。"""
+        if self._spi_chip_size is not None:
+            return self._spi_chip_size
+        id_bytes, err = self.proto.spi_get_id()
+        if err:
+            self.log(f"SPI ID 读取失败: {err}")
+            return None
+        chip_name, chip_size = lookup_spi_chip(id_bytes)
+        if not chip_size:
+            hex_str = ' '.join(f'0x{b:02X}' for b in id_bytes)
+            self.log(f"未识别的芯片 ID: {hex_str}，请先点击'读取 Flash ID'确认芯片。")
+            return None
+        self._spi_chip_size = chip_size
+        if chip_name:
+            size_mb = chip_size / (1024 * 1024)
+            self.spi_id_result.set(f"{chip_name} ({size_mb:.0f}MB)")
+            self.log(f"识别芯片: {chip_name}, 容量: {size_mb:.0f}MB")
+        return chip_size
+
+    def _on_spi_choose_file(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Binary", "*.bin"), ("All Files", "*.*")],
+            title="选择 SPI Flash 镜像文件"
+        )
+        if not path:
+            return
+        import os
+        fsize = os.path.getsize(path)
+        # 需要先确定芯片大小
+        if not self._check_conn():
+            return
+        chip_size = self._ensure_spi_chip_size()
+        if chip_size is None:
+            return
+        if fsize > chip_size:
+            self.log(f"文件大小 ({fsize} bytes = {fsize / 1024 / 1024:.2f}MB) 超过芯片容量 ({chip_size} bytes)，操作取消")
+            tk.messagebox.showwarning("文件过大",
+                f"文件大小: {fsize} bytes ({fsize / 1024 / 1024:.2f}MB)\n"
+                f"芯片容量: {chip_size} bytes ({chip_size / 1024 / 1024:.0f}MB)\n\n"
+                f"文件超出容量 {fsize - chip_size} bytes，无法写入。")
+            return
+        self.spi_write_file.set(path)
+        self.log(f"已选择文件: {path} ({fsize} bytes)")
+
+    def on_spi_write_all(self):
+        if not self._check_conn():
+            return
+        path = self.spi_write_file.get()
+        if not path:
+            self.log("请先选择文件")
+            return
+        chip_size = self._ensure_spi_chip_size()
+        if chip_size is None:
+            return
+        with open(path, 'rb') as f:
+            file_data = f.read()
+        if len(file_data) > chip_size:
+            self.log(f"文件过大 ({len(file_data)} > {chip_size})，取消写入")
+            return
+        if len(file_data) == 0:
+            self.log("文件为空，取消写入")
+            return
+        # 对齐到 4KB (SPI Flash 最小擦除单位)
+        padded = file_data + b'\xFF' * ((4096 - len(file_data) % 4096) % 4096)
+        do_backup = self.spi_opt_backup.get()
+        do_erase = self.spi_opt_erase.get()
+        do_verify = self.spi_opt_verify.get()
+        self.spi_write_progress['value'] = 0
+        self.spi_write_progress['maximum'] = 100
+        self.spi_write_progress_label.set("0%")
+        self.log(f"SPI Flash 完整写入开始: {len(file_data)} bytes (填充至 {len(padded)} bytes)")
+        threading.Thread(target=self._spi_write_all_thread,
+                         args=(padded, chip_size, do_backup, do_erase, do_verify),
+                         daemon=True).start()
+
+    def _spi_write_all_thread(self, data, _chip_size, do_backup, do_erase, do_verify):
+        total = len(data)
+        chunk_size = 52
+        erase_block_size = 4096
+
+        # Step 1: 备份
+        if do_backup:
+            self.root.after(0, self._spi_write_progress_update, 0, "备份中...")
+            for offset in range(0, total, chunk_size):
+                n = min(chunk_size, total - offset)
+                chunk, err = self.proto.spi_read(offset, n)
+                if err:
+                    self.root.after(0, self._spi_write_all_done, False,
+                                    f"备份读取失败 @ 0x{offset:08X}: {err}")
+                    return
+                pct = (offset + n) * 10 // total
+                self.root.after(0, self._spi_write_progress_update, pct, None)
+            self.root.after(0, self.log, "SPI Flash 备份完成")
+
+        # Step 2: 擦除
+        if do_erase:
+            self.root.after(0, self._spi_write_progress_update, 10, "擦除中...")
+            # 计算需要擦除的块
+            erase_blocks = set()
+            for offset in range(0, total, erase_block_size):
+                erase_blocks.add(offset & ~(erase_block_size - 1))
+            blocks = sorted(erase_blocks)
+            for i, block_base in enumerate(blocks):
+                _, err = self.proto.spi_erase_block(block_base)
+                if err:
+                    self.root.after(0, self._spi_write_all_done, False,
+                                    f"擦除失败 @ 0x{block_base:08X}: {err}")
+                    return
+                pct = 10 + (i + 1) * 10 // len(blocks)
+                self.root.after(0, self._spi_write_progress_update, pct, None)
+
+        # Step 3: 写入
+        self.root.after(0, self._spi_write_progress_update, 20, "写入中...")
+        for offset in range(0, total, chunk_size):
+            n = min(chunk_size, total - offset)
+            chunk = data[offset:offset + n]
+            _, err = self.proto.spi_write(offset, chunk)
+            if err:
+                self.root.after(0, self._spi_write_all_done, False,
+                                f"写入失败 @ 0x{offset:08X}: {err}")
+                return
+            pct = 20 + (offset + n) * 50 // total
+            self.root.after(0, self._spi_write_progress_update, pct, None)
+
+        # Step 4: 校验
+        if do_verify:
+            self.root.after(0, self._spi_write_progress_update, 70, "校验中...")
+            for offset in range(0, total, chunk_size):
+                n = min(chunk_size, total - offset)
+                chunk, err = self.proto.spi_read(offset, n)
+                if err:
+                    self.root.after(0, self._spi_write_all_done, False,
+                                    f"校验读取失败 @ 0x{offset:08X}: {err}")
+                    return
+                if chunk != data[offset:offset + n]:
+                    self.root.after(0, self._spi_write_all_done, False,
+                                    f"校验失败 @ 0x{offset:08X}: 数据不匹配")
+                    return
+                pct = 70 + (offset + n) * 30 // total
+                self.root.after(0, self._spi_write_progress_update, pct, None)
+
+        self.root.after(0, self._spi_write_all_done, True, None)
+
+    def _spi_write_progress_update(self, pct, msg):
+        if pct is not None:
+            self.spi_write_progress['value'] = pct
+        if msg:
+            self.spi_write_progress_label.set(msg)
+        else:
+            self.spi_write_progress_label.set(f"{pct}%")
+
+    def _spi_write_all_done(self, _success, err):
+        if err:
+            self.log(f"SPI Flash 完整写入失败: {err}")
+            self.spi_write_progress_label.set("失败")
+            return
+        self.spi_write_progress['value'] = 100
+        self.spi_write_progress_label.set("完成")
+        self.log("SPI Flash 完整写入成功")
 
     def run(self):
         self.root.mainloop()
