@@ -34,7 +34,7 @@ DSTATUS disk_status (
 	printf("disk_status\n");
 	DSTATUS stat;
 	//int result;
-	uint8_t id[2]={0x0,0x0};
+	uint8_t id[3]={0x0,0x0,0x0};
 	switch (pdrv) {
 	case SD_CARD :
 
@@ -44,7 +44,7 @@ DSTATUS disk_status (
 
 		BSP_W25Qx_Read_ID(id);
 
-		if(id[0]==0xef && id[1]==0x16)
+		if(id[0]==0xef && id[2]>=0x16)
 			stat=0;
 		else
 			stat= STA_NOINIT;

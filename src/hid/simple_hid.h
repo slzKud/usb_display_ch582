@@ -40,6 +40,7 @@ extern struct Variant variant_slots[16];
 #define FATFS_ACTION_CREATE_FILE        0x05
 #define FATFS_ACTION_WRITE_FILE         0x06
 #define FATFS_ACTION_GET_FS_INFO        0x07
+#define FATFS_ACTION_FORMAT             0x08
 
 #define FATFS_MAX_FILES       64
 #define FATFS_MAX_FILENAME    32

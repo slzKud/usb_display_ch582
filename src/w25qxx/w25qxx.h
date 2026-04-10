@@ -105,7 +105,10 @@ uint8_t BSP_W25Qx_WriteEnable(void);
 void BSP_W25Qx_Read_ID(uint8_t *ID);
 uint8_t BSP_W25Qx_Read(uint8_t* pData, uint32_t ReadAddr, uint32_t Size);
 uint8_t BSP_W25Qx_Write(uint8_t* pData, uint32_t WriteAddr, uint32_t Size);
+uint8_t BSP_W25Qx_Write_NB(uint8_t* pData, uint32_t WriteAddr, uint32_t Size);
 uint8_t BSP_W25Qx_Erase_Block(uint32_t Address);
+uint8_t BSP_W25Qx_Erase_Block_NB(uint32_t Address);
+uint8_t BSP_W25Qx_Erase_Chip_NB(void);
 uint8_t BSP_W25Qx_Erase_Chip(void);
 uint8_t CH58X_SPI_INIT_W25Qx();
  

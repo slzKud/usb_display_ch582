@@ -318,19 +318,19 @@ int handle_mcu_opt_SPI_W25Q64_COMMAND(uint8_t *data, uint8_t data_length, int po
 
     if (action == 0x0) // EEPROM_ID
     {
-        uint8_t id[4] = {0};
+        uint8_t id[3] = {0};
         BSP_W25Qx_Read_ID(id);
         uint8_t *req = make_header();
         uint8_t *hdr = req + MAGIC_CODE_LENGTH;
         *hdr = COMMAND_MCU_OPT | 0x20;
-        *(hdr + 1) = 0x6; // len=5: status(1) + action(1) + id(4) - 但按协议len不含status
+        *(hdr + 1) = 0x5; // len=5: status(1) + action(1) + id(3)
         *(hdr + 2) = 0x00; // status OK
         *(hdr + 3) = action;
-        memcpy(hdr + 4, id, 4);
-        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 1 + 1 + 4);
-        *(hdr + 8) = checksum;
+        memcpy(hdr + 4, id, 3);
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 1 + 1 + 3);
+        *(hdr + 7) = checksum;
         *resp_data = req;
-        *resp_data_length = 2 + 1 + 1 + 1 + 1 + 4 + 1;
+        *resp_data_length = 2 + 1 + 1 + 1 + 1 + 3 + 1;
         return PARSE_STATUS_SUCCESS;
     }
     else if (action == 0x1) // READ_RAW_DATA [OFFSET(4)] [LENGTH(2)]
@@ -376,7 +376,7 @@ int handle_mcu_opt_SPI_W25Q64_COMMAND(uint8_t *data, uint8_t data_length, int po
         free(read_buf);
         return PARSE_STATUS_SUCCESS;
     }
-    else if (action == 0x2) // WRITE_RAW_DATA [OFFSET(4)] [LENGTH(2)] [DATA]
+    else if (action == 0x2) // WRITE_RAW_DATA [OFFSET(4)] [LENGTH(2)] [DATA] - 直接页编程，不自动擦除
     {
         if (data_length < 8)
             return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
@@ -388,26 +388,14 @@ int handle_mcu_opt_SPI_W25Q64_COMMAND(uint8_t *data, uint8_t data_length, int po
         if (length == 0 || (8 + length) > data_length)
             return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
 
-        // 按4KB块对齐擦除，需要先读回块内原有数据再合并写入
-        uint32_t block_base = offset & ~(0xFFF);
-        uint32_t block_offset = offset - block_base;
-
-        uint8_t *block_buf = malloc(4096);
-        if (block_buf == NULL)
-            return PARSE_STATUS_FAILED;
-
-        BSP_W25Qx_Read(block_buf, block_base, 4096);
-        memcpy(block_buf + block_offset, data + 7, length);
-        BSP_W25Qx_Erase_Block(block_base);
-        uint8_t ret = BSP_W25Qx_Write(block_buf, block_base, 4096);
-        free(block_buf);
-        uint8_t status = (ret == W25Qx_OK) ? 0x00 : 0x01;
+        // 自动按页拆分写入（调用方需先擦除对应块）
+        BSP_W25Qx_Write(data + 8, offset, length);
 
         uint8_t *req = make_header();
         uint8_t *hdr = req + MAGIC_CODE_LENGTH;
         *hdr = COMMAND_MCU_OPT | 0x20;
         *(hdr + 1) = 0x2; // len=2: status(1) + action(1)
-        *(hdr + 2) = status;
+        *(hdr + 2) = 0x00; // status OK
         *(hdr + 3) = action;
         uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 2);
         *(hdr + 4) = checksum;
@@ -417,7 +405,7 @@ int handle_mcu_opt_SPI_W25Q64_COMMAND(uint8_t *data, uint8_t data_length, int po
     }
     else if (action == 0x3) // ERASE_CHIP
     {
-        uint8_t ret = BSP_W25Qx_Erase_Chip();
+        uint8_t ret = BSP_W25Qx_Erase_Chip_NB();
         uint8_t status = (ret == W25Qx_OK) ? 0x00 : 0x01;
 
         uint8_t *req = make_header();
@@ -434,7 +422,7 @@ int handle_mcu_opt_SPI_W25Q64_COMMAND(uint8_t *data, uint8_t data_length, int po
     }
     else if (action == 0x4) // ERASE_BLOCK [OFFSET(4)]
     {
-        if (data_length < 5)
+        if (data_length < 6)
             return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
 
         uint32_t offset = (uint32_t)data[2] | ((uint32_t)data[3] << 8) |
@@ -442,7 +430,7 @@ int handle_mcu_opt_SPI_W25Q64_COMMAND(uint8_t *data, uint8_t data_length, int po
         // 按4KB块对齐
         offset &= ~(0xFFF);
 
-        uint8_t ret = BSP_W25Qx_Erase_Block(offset);
+        uint8_t ret = BSP_W25Qx_Erase_Block_NB(offset);
         uint8_t status = (ret == W25Qx_OK) ? 0x00 : 0x01;
 
         uint8_t *req = make_header();
@@ -455,6 +443,22 @@ int handle_mcu_opt_SPI_W25Q64_COMMAND(uint8_t *data, uint8_t data_length, int po
         *(hdr + 4) = checksum;
         *resp_data = req;
         *resp_data_length = 2 + 1 + 1 + 2 + 1;
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == 0x5) // GET_STATUS - 查询芯片忙/就绪状态
+    {
+        uint8_t spi_status = BSP_W25Qx_GetStatus();
+        uint8_t *req = make_header();
+        uint8_t *hdr = req + MAGIC_CODE_LENGTH;
+        *hdr = COMMAND_MCU_OPT | 0x20;
+        *(hdr + 1) = 0x3; // len=3: status(1) + action(1) + spi_status(1)
+        *(hdr + 2) = 0x00; // 命令执行状态 OK
+        *(hdr + 3) = action;
+        *(hdr + 4) = spi_status; // W25Qx_OK=0x00, W25Qx_BUSY=0x02
+        uint8_t checksum = make_checksum(req, 2 + 1 + 1 + 1 + 1 + 1);
+        *(hdr + 5) = checksum;
+        *resp_data = req;
+        *resp_data_length = 2 + 1 + 1 + 1 + 1 + 1 + 1;
         return PARSE_STATUS_SUCCESS;
     }
 
@@ -547,7 +551,7 @@ int handle_mcu_opt_DATAFLASH_COMMAND(uint8_t *data, uint8_t data_length, int por
             EEPROM_ERASE((uint32_t)cur_page_base, 256);
         }
         // 合并新数据到缓冲区
-        memcpy(page_buf + page_offset, data + 5, length);
+        memcpy(page_buf + page_offset, data + 6, length);
         // 写回所有页
         for (uint16_t i = 0; i < total_pages; i++)
         {
@@ -923,7 +927,7 @@ int handle_mcu_opt_FATFS_COMMAND(uint8_t *data, uint8_t data_length, int port_nu
         snprintf(path, sizeof(path), "1:/%s", fname);
 
         FIL fp;
-        FRESULT fr = f_open(&fp, path, FA_CREATE_NEW | FA_WRITE);
+        FRESULT fr = f_open(&fp, path, FA_CREATE_ALWAYS | FA_WRITE);
         if (fr != FR_OK) {
             fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
             return PARSE_STATUS_SUCCESS;
@@ -1011,6 +1015,39 @@ int handle_mcu_opt_FATFS_COMMAND(uint8_t *data, uint8_t data_length, int port_nu
         write_le32(extra + 4, free_bytes);
 
         fatfs_make_resp(action, 0x00, extra, 8, resp_data, resp_data_length);
+        return PARSE_STATUS_SUCCESS;
+    }
+    else if (action == FATFS_ACTION_FORMAT) // 0x08
+    {
+        // 先卸载已挂载的文件系统
+        f_mount(NULL, "1:", 0);
+        fs_mounted = 0;
+
+        // f_mkfs需要一个工作缓冲区，至少4096字节(SPI FLASH扇区大小)
+        uint8_t *mkfs_buf = malloc(4096);
+        if (mkfs_buf == NULL) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        MKFS_PARM mkfs_opt;
+        memset(&mkfs_opt, 0, sizeof(mkfs_opt));
+        mkfs_opt.fmt = FM_FAT | FM_SFD;
+        mkfs_opt.n_fat = 1;
+        mkfs_opt.align = 4096;   // SPI FLASH扇区对齐
+
+        FRESULT fr = f_mkfs("1:", &mkfs_opt, mkfs_buf, 4096);
+        free(mkfs_buf);
+
+        if (fr != FR_OK) {
+            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            return PARSE_STATUS_SUCCESS;
+        }
+
+        // 格式化成功，清空文件缓存
+        file_count = 0;
+
+        fatfs_make_resp(action, 0x00, NULL, 0, resp_data, resp_data_length);
         return PARSE_STATUS_SUCCESS;
     }
 

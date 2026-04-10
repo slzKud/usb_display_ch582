@@ -8,11 +8,13 @@ from tkinter import ttk, scrolledtext, filedialog
 import hid
 
 # SPI Flash 芯片 ID 查找表
-# 固件使用 READ_ID (0x90) 命令，返回 2 字节: [manufacturer_id, device_id]
-# device_id 即容量编码: 0x14=8Mbit, 0x15=16Mbit, 0x16=32Mbit, 0x17=64Mbit, 0x18=128Mbit, 0x19=256Mbit
+# 固件使用 JEDEC ID (0x9F) 命令，返回 3 字节: [manufacturer_id, memory_type, capacity_id]
+# capacity_id 编码: 0x14=8Mbit, 0x15=16Mbit, 0x16=32Mbit, 0x17=64Mbit, 0x18=128Mbit, 0x19=256Mbit
 W25Q_CHIP_TABLE = {
     0xEF: {  # Winbond
         0x16: ("W25Q64",   8 * 1024 * 1024),      # 8MB
+        0x17: ("W25Q64",   8 * 1024 * 1024),      # 8MB
+        0x18: ("W25Q256", 32 * 1024 * 1024),      # 32MB
     },
 }
 
@@ -32,6 +34,23 @@ MCU_OPT_GPIO_DIR = 0x02
 MCU_OPT_SPI = 0x03
 MCU_OPT_DATAFLASH = 0x04
 MCU_OPT_VARIANT = 0x05
+MCU_OPT_FATFS = 0x06
+
+# FATFS actions
+FATFS_CHECK_FORMATTED = 0x01
+FATFS_SCAN_FILES = 0x02
+FATFS_GET_FILE_INFO = 0x03
+FATFS_READ_FILE = 0x04
+FATFS_CREATE_FILE = 0x05
+FATFS_WRITE_FILE = 0x06
+FATFS_GET_FS_INFO = 0x07
+FATFS_FORMAT = 0x08
+
+# HID包64字节, 写入命令头: MAGIC(2)+CMD(1)+LEN(1)+ACTION(1)+FILE_INDEX(1)+OFFSET(4)+DATA_LEN(1)+CHK(1) = 12
+# 可用数据空间: 64 - 12 = 52, 但LEN字段限制payload最大63, payload=ACTION+FILE_INDEX+OFFSET+DATA_LEN+DATA=8+DATA
+# 所以DATA最大 = 64 - 2(MAGIC) - 1(CMD) - 1(LEN) - 8(头部) - 1(CHK) = 51
+FATFS_WRITE_CHUNK = 51
+FATFS_READ_CHUNK = 52
 
 # SPI actions
 SPI_GET_ID = 0x00
@@ -39,6 +58,7 @@ SPI_READ = 0x01
 SPI_WRITE = 0x02
 SPI_ERASE_CHIP = 0x03
 SPI_ERASE_BLOCK = 0x04
+SPI_GET_STATUS = 0x05
 
 # DataFlash actions
 DF_READ = 0x01
@@ -137,17 +157,18 @@ def hexdump(data, prefix=""):
 
 
 def lookup_spi_chip(id_bytes):
-    """从 READ_ID 返回的字节查找芯片型号和大小。
-    id_bytes 格式: [manufacturer_id, device_id, 0, 0]
+    """从 JEDEC ID 返回的字节查找芯片型号和大小。
+    id_bytes 格式: [manufacturer_id, memory_type, capacity_id]
     返回 (chip_name, size_bytes) 或 (None, None)。"""
-    if len(id_bytes) < 2:
+    if len(id_bytes) < 3:
         return None, None
-    mfr, dev_id = id_bytes[0], id_bytes[1]
+    mfr, cap_id = id_bytes[0], id_bytes[2]
     if mfr in W25Q_CHIP_TABLE:
         chips = W25Q_CHIP_TABLE[mfr]
-        if dev_id in chips:
-            return chips[dev_id]
-    return f"未知(mfr=0x{mfr:02X},dev=0x{dev_id:02X})", None
+        if cap_id in chips:
+            return chips[cap_id]
+    hex_str = ' '.join(f'0x{b:02X}' for b in id_bytes)
+    return f"未知({hex_str})", None
 
 
 class HIDProtocol:
@@ -210,7 +231,7 @@ class HIDProtocol:
         resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, [MCU_OPT_SPI, SPI_GET_ID])
         if err:
             return None, err
-        return payload[2:6], None  # skip status + action
+        return payload[2:5], None  # skip status + action, 3 bytes JEDEC ID
 
     def spi_read(self, offset, length):
         data = [MCU_OPT_SPI, SPI_READ] + list(struct.pack('<I', offset)) + list(struct.pack('<H', length))
@@ -238,6 +259,25 @@ class HIDProtocol:
         if err:
             return None, err
         return payload[0], None
+
+    def spi_get_status(self):
+        resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, [MCU_OPT_SPI, SPI_GET_STATUS])
+        if err:
+            return None, err
+        return payload[2], None  # spi_status: 0x00=OK, 0x02=BUSY
+
+    def spi_wait_ready(self, timeout_ms=30000, poll_interval_ms=100):
+        """轮询 SPI flash 状态直到就绪或超时。返回 (ready, err)。"""
+        import time
+        deadline = time.time() + timeout_ms / 1000.0
+        while time.time() < deadline:
+            status, err = self.spi_get_status()
+            if err:
+                return False, err
+            if status == 0x00:  # W25Qx_OK
+                return True, None
+            time.sleep(poll_interval_ms / 1000.0)
+        return False, "轮询超时"
 
     # ─── DataFlash ───
     def dataflash_read(self, offset, length):
@@ -276,6 +316,77 @@ class HIDProtocol:
         if payload[0] != 0:
             return None, None, f"状态: {STATUS_NAMES.get(payload[0], 'UNKNOWN')}"
         return parse_variant(payload[2:])  # skip status + var_id
+
+    # ─── FATFS ───
+    def fatfs_check_formatted(self):
+        resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, [MCU_OPT_FATFS, FATFS_CHECK_FORMATTED])
+        if err:
+            return None, err
+        return payload[0], None  # 0x00=已格式化, 0x01=未格式化
+
+    def fatfs_format(self):
+        resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, [MCU_OPT_FATFS, FATFS_FORMAT])
+        if err:
+            return None, err
+        return payload[0], None
+
+    def fatfs_scan_files(self):
+        resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, [MCU_OPT_FATFS, FATFS_SCAN_FILES])
+        if err:
+            return None, err
+        return payload[2], None  # file_count: payload=[STATUS, ACTION, COUNT]
+
+    def fatfs_get_file_info(self, file_index):
+        resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, [MCU_OPT_FATFS, FATFS_GET_FILE_INFO, file_index])
+        if err:
+            return None, err
+        if payload[0] != 0:
+            return None, f"状态: {STATUS_NAMES.get(payload[0], 'UNKNOWN')}"
+        # payload: [STATUS][ACTION][FILESIZE(4B)][TOTAL_CHUNKS(2B)][FILENAME\0]
+        p = bytes(payload)
+        fsize = struct.unpack_from('<I', p, 2)[0]
+        total_chunks = struct.unpack_from('<H', p, 6)[0]
+        fname = p[8:].split(b'\x00')[0].decode('ascii', errors='replace')
+        return {"size": fsize, "chunks": total_chunks, "name": fname}, None
+
+    def fatfs_read_file(self, file_index, chunk_index):
+        data = [MCU_OPT_FATFS, FATFS_READ_FILE, file_index] + list(struct.pack('<H', chunk_index))
+        resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, data)
+        if err:
+            return None, err
+        if payload[0] != 0:
+            return None, f"状态: {STATUS_NAMES.get(payload[0], 'UNKNOWN')}"
+        # payload: [STATUS][ACTION][CHUNK_INDEX(2B)][BYTES_READ(1B)][DATA...]
+        bytes_read = payload[4]
+        return bytes(payload[5:5 + bytes_read]), None
+
+    def fatfs_create_file(self, filename, file_size):
+        fname_bytes = filename.encode('ascii')
+        data = [MCU_OPT_FATFS, FATFS_CREATE_FILE, len(fname_bytes)] + list(fname_bytes) + list(struct.pack('<I', file_size))
+        resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, data)
+        if err:
+            return None, err
+        return payload[0], None
+
+    def fatfs_write_file(self, file_index, offset, data):
+        payload = [MCU_OPT_FATFS, FATFS_WRITE_FILE, file_index] + list(struct.pack('<I', offset))
+        payload.append(len(data))
+        payload.extend(data)
+        resp_cmd, resp_payload, err = self.send_recv(CMD_MCU_OPT, payload)
+        if err:
+            return None, err
+        return resp_payload[0], None
+
+    def fatfs_get_fs_info(self):
+        resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, [MCU_OPT_FATFS, FATFS_GET_FS_INFO])
+        if err:
+            return None, err
+        if payload[0] != 0:
+            return None, f"状态: {STATUS_NAMES.get(payload[0], 'UNKNOWN')}"
+        p = bytes(payload)
+        total = struct.unpack_from('<I', p, 2)[0]
+        free = struct.unpack_from('<I', p, 6)[0]
+        return {"total": total, "free": free}, None
 
 
 class HIDTesterGUI:
@@ -316,6 +427,7 @@ class HIDTesterGUI:
         self._build_tab_gpio()
         self._build_tab_dataflash()
         self._build_tab_spi()
+        self._build_tab_fatfs()
 
         # 底部日志
         log_frame = ttk.LabelFrame(self.root, text="通信日志", padding=5)
@@ -777,7 +889,10 @@ class HIDTesterGUI:
                     self.root.after(0, self._df_write_all_done, False, f"备份读取失败 @ 0x{offset:04X}: {err}")
                     return
                 backup.extend(chunk)
-            self.root.after(0, self.log, f"DataFlash 备份完成 ({len(backup)} bytes)")
+                pct = (offset + n) * 10 // total
+                self.root.after(0, self._df_write_progress_update, pct, None)
+            # 备份数据保存到本地
+            self._df_save_backup(bytes(backup))
 
         # Step 2: 擦除
         if do_erase:
@@ -840,6 +955,16 @@ class HIDTesterGUI:
         self.df_write_progress['value'] = 100
         self.df_write_progress_label.set("完成")
         self.log("DataFlash 完整写入成功")
+
+    def _df_save_backup(self, backup_data):
+        import os
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(save_dir, f"dataflash_backup_{ts}.bin")
+        with open(path, 'wb') as f:
+            f.write(backup_data)
+        self.log(f"DataFlash 备份已保存: {path} ({len(backup_data)} bytes)")
 
     # ─── Tab: SPI Flash ───
     def _build_tab_spi(self):
@@ -971,30 +1096,57 @@ class HIDTesterGUI:
         offset = int(self.spi_offset.get(), 16)
         hex_str = self.spi_write_data.get().replace(' ', '').replace(',', '')
         data = bytes.fromhex(hex_str)
-        status, err = self.proto.spi_write(offset, data)
-        if err:
-            self.log(f"SPI 写入失败: {err}")
-        else:
-            self.log(f"SPI 写入 0x{offset:08X} ({len(data)} bytes) → {STATUS_NAMES.get(status, '?')}")
+        self.log(f"SPI 写入 0x{offset:08X} ({len(data)} bytes)...")
+
+        def _do():
+            _, err = self.proto.spi_write(offset, data)
+            if err:
+                self.root.after(0, lambda: self.log(f"SPI 写入失败: {err}"))
+                return
+            _, err = self.proto.spi_wait_ready(timeout_ms=5000)
+            if err:
+                self.root.after(0, lambda: self.log(f"SPI 写入等待超时: {err}"))
+            else:
+                self.root.after(0, lambda: self.log(f"SPI 写入 0x{offset:08X} ({len(data)} bytes) → 完成"))
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def on_spi_erase_chip(self):
         if not self._check_conn():
             return
-        status, err = self.proto.spi_erase_chip()
-        if err:
-            self.log(f"SPI 全片擦除失败: {err}")
-        else:
-            self.log(f"SPI 全片擦除 → {STATUS_NAMES.get(status, '?')}")
+        self.log("SPI 全片擦除中...")
+
+        def _do():
+            _, err = self.proto.spi_erase_chip()
+            if err:
+                self.root.after(0, lambda: self.log(f"SPI 全片擦除失败: {err}"))
+                return
+            _, err = self.proto.spi_wait_ready(timeout_ms=120000)
+            if err:
+                self.root.after(0, lambda: self.log(f"SPI 全片擦除等待超时: {err}"))
+            else:
+                self.root.after(0, lambda: self.log("SPI 全片擦除完成"))
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def on_spi_erase_block(self):
         if not self._check_conn():
             return
         offset = int(self.spi_block_offset.get(), 16)
-        status, err = self.proto.spi_erase_block(offset)
-        if err:
-            self.log(f"SPI 块擦除失败: {err}")
-        else:
-            self.log(f"SPI 块擦除 0x{offset:08X} → {STATUS_NAMES.get(status, '?')}")
+        self.log(f"SPI 擦除 4KB 块 0x{offset:08X}...")
+
+        def _do():
+            _, err = self.proto.spi_erase_block(offset)
+            if err:
+                self.root.after(0, lambda: self.log(f"SPI 块擦除失败: {err}"))
+                return
+            _, err = self.proto.spi_wait_ready(timeout_ms=5000)
+            if err:
+                self.root.after(0, lambda: self.log(f"SPI 块擦除等待超时: {err}"))
+            else:
+                self.root.after(0, lambda: self.log(f"SPI 块擦除 0x{offset:08X} → 完成"))
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def on_spi_read_all(self):
         if not self._check_conn():
@@ -1024,7 +1176,7 @@ class HIDTesterGUI:
         threading.Thread(target=self._spi_read_all_thread, args=(total,), daemon=True).start()
 
     def _spi_read_all_thread(self, total):
-        chunk_size = 52
+        chunk_size = 51
         buf = bytearray()
         for offset in range(0, total, chunk_size):
             n = min(chunk_size, total - offset)
@@ -1148,27 +1300,30 @@ class HIDTesterGUI:
 
     def _spi_write_all_thread(self, data, _chip_size, do_backup, do_erase, do_verify):
         total = len(data)
-        chunk_size = 52
+        page_size = 256
         erase_block_size = 4096
 
         # Step 1: 备份
         if do_backup:
             self.root.after(0, self._spi_write_progress_update, 0, "备份中...")
-            for offset in range(0, total, chunk_size):
-                n = min(chunk_size, total - offset)
+            backup = bytearray()
+            read_chunk = 52
+            for offset in range(0, total, read_chunk):
+                n = min(read_chunk, total - offset)
                 chunk, err = self.proto.spi_read(offset, n)
                 if err:
                     self.root.after(0, self._spi_write_all_done, False,
                                     f"备份读取失败 @ 0x{offset:08X}: {err}")
                     return
+                backup.extend(chunk)
                 pct = (offset + n) * 10 // total
                 self.root.after(0, self._spi_write_progress_update, pct, None)
-            self.root.after(0, self.log, "SPI Flash 备份完成")
+            # 备份数据保存到本地
+            self._spi_save_backup(bytes(backup))
 
         # Step 2: 擦除
         if do_erase:
             self.root.after(0, self._spi_write_progress_update, 10, "擦除中...")
-            # 计算需要擦除的块
             erase_blocks = set()
             for offset in range(0, total, erase_block_size):
                 erase_blocks.add(offset & ~(erase_block_size - 1))
@@ -1179,13 +1334,31 @@ class HIDTesterGUI:
                     self.root.after(0, self._spi_write_all_done, False,
                                     f"擦除失败 @ 0x{block_base:08X}: {err}")
                     return
+                # 等待擦除完成（每块最多3秒）
+                _, err = self.proto.spi_wait_ready(timeout_ms=5000)
+                if err:
+                    self.root.after(0, self._spi_write_all_done, False,
+                                    f"擦除等待失败 @ 0x{block_base:08X}: {err}")
+                    return
                 pct = 10 + (i + 1) * 10 // len(blocks)
                 self.root.after(0, self._spi_write_progress_update, pct, None)
 
-        # Step 3: 写入
+        # Step 3: 写入（每包51字节，跨页时等待上一页编程完成）
         self.root.after(0, self._spi_write_progress_update, 20, "写入中...")
-        for offset in range(0, total, chunk_size):
-            n = min(chunk_size, total - offset)
+        spi_chunk = 51
+        last_page = -1
+        for offset in range(0, total, spi_chunk):
+            n = min(spi_chunk, total - offset)
+            # 当前包的起始字节所在页
+            cur_page = offset // page_size
+            # 跨页：等待上一页编程完成
+            if cur_page != last_page and last_page >= 0:
+                _, err = self.proto.spi_wait_ready(timeout_ms=5000)
+                if err:
+                    self.root.after(0, self._spi_write_all_done, False,
+                                    f"写入等待失败 @ 0x{offset:08X}: {err}")
+                    return
+            last_page = cur_page
             chunk = data[offset:offset + n]
             _, err = self.proto.spi_write(offset, chunk)
             if err:
@@ -1194,12 +1367,19 @@ class HIDTesterGUI:
                 return
             pct = 20 + (offset + n) * 50 // total
             self.root.after(0, self._spi_write_progress_update, pct, None)
+        # 最后一页写完后等待
+        _, err = self.proto.spi_wait_ready(timeout_ms=5000)
+        if err:
+            self.root.after(0, self._spi_write_all_done, False,
+                            f"写入等待失败: {err}")
+            return
 
         # Step 4: 校验
         if do_verify:
             self.root.after(0, self._spi_write_progress_update, 70, "校验中...")
-            for offset in range(0, total, chunk_size):
-                n = min(chunk_size, total - offset)
+            read_chunk = 52
+            for offset in range(0, total, read_chunk):
+                n = min(read_chunk, total - offset)
                 chunk, err = self.proto.spi_read(offset, n)
                 if err:
                     self.root.after(0, self._spi_write_all_done, False,
@@ -1230,6 +1410,355 @@ class HIDTesterGUI:
         self.spi_write_progress['value'] = 100
         self.spi_write_progress_label.set("完成")
         self.log("SPI Flash 完整写入成功")
+
+    def _spi_save_backup(self, backup_data):
+        import os
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(save_dir, f"spiflash_backup_{ts}.bin")
+        with open(path, 'wb') as f:
+            f.write(backup_data)
+        self.log(f"SPI Flash 备份已保存: {path} ({len(backup_data)} bytes)")
+
+    # ─── Tab: FATFS ───
+    def _build_tab_fatfs(self):
+        tab = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab, text="FATFS 文件系统")
+
+        # 第一行: 检查 / 格式化
+        row0 = ttk.Frame(tab)
+        row0.pack(fill='x', pady=5)
+        ttk.Button(row0, text="检查格式化状态", command=self.on_fatfs_check).pack(side='left')
+        self.fatfs_check_result = tk.StringVar()
+        ttk.Label(row0, textvariable=self.fatfs_check_result).pack(side='left', padx=10)
+
+        row0b = ttk.Frame(tab)
+        row0b.pack(fill='x', pady=5)
+        ttk.Button(row0b, text="格式化 (FAT)", command=self.on_fatfs_format).pack(side='left')
+        ttk.Button(row0b, text="格式化 (需确认)", command=self.on_fatfs_format_confirm).pack(side='left', padx=5)
+
+        # 第二行: 文件系统信息
+        row1 = ttk.Frame(tab)
+        row1.pack(fill='x', pady=5)
+        ttk.Button(row1, text="获取文件系统信息", command=self.on_fatfs_get_fs_info).pack(side='left')
+        self.fatfs_fs_info = tk.StringVar()
+        ttk.Label(row1, textvariable=self.fatfs_fs_info).pack(side='left', padx=10)
+
+        # 分隔
+        sep = ttk.Separator(tab, orient='horizontal')
+        sep.pack(fill='x', pady=8)
+
+        # 文件列表区域
+        ttk.Label(tab, text="文件操作:", font=('', 10, 'bold')).pack(anchor='w')
+
+        row2 = ttk.Frame(tab)
+        row2.pack(fill='x', pady=5)
+        ttk.Button(row2, text="扫描文件", command=self.on_fatfs_scan).pack(side='left')
+        self.fatfs_file_count = tk.StringVar()
+        ttk.Label(row2, textvariable=self.fatfs_file_count).pack(side='left', padx=10)
+
+        # 文件列表
+        list_frame = ttk.Frame(tab)
+        list_frame.pack(fill='both', expand=True, pady=5)
+
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side='right', fill='y')
+
+        columns = ('name', 'size', 'chunks')
+        self.fatfs_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=6,
+                                        yscrollcommand=scrollbar.set)
+        self.fatfs_tree.heading('name', text='文件名')
+        self.fatfs_tree.heading('size', text='大小 (bytes)')
+        self.fatfs_tree.heading('chunks', text='块数')
+        self.fatfs_tree.column('name', width=250)
+        self.fatfs_tree.column('size', width=120)
+        self.fatfs_tree.column('chunks', width=80)
+        self.fatfs_tree.pack(side='left', fill='both', expand=True)
+        scrollbar.config(command=self.fatfs_tree.yview)
+
+        # 文件操作按钮
+        row3 = ttk.Frame(tab)
+        row3.pack(fill='x', pady=5)
+        ttk.Button(row3, text="读取选中文件", command=self.on_fatfs_read_selected).pack(side='left')
+        ttk.Button(row3, text="保存选中文件", command=self.on_fatfs_save_selected).pack(side='left', padx=5)
+
+        # 写入新文件
+        sep2 = ttk.Separator(tab, orient='horizontal')
+        sep2.pack(fill='x', pady=8)
+        ttk.Label(tab, text="上传文件:", font=('', 10, 'bold')).pack(anchor='w')
+
+        row4 = ttk.Frame(tab)
+        row4.pack(fill='x', pady=3)
+        ttk.Label(row4, text="本地文件:").pack(side='left')
+        self.fatfs_upload_file = tk.StringVar()
+        ttk.Entry(row4, textvariable=self.fatfs_upload_file, width=40, state='readonly').pack(side='left', padx=5)
+        ttk.Button(row4, text="选择文件...", command=self._on_fatfs_choose_file).pack(side='left')
+
+        row5 = ttk.Frame(tab)
+        row5.pack(fill='x', pady=3)
+        ttk.Label(row5, text="远程文件名:").pack(side='left')
+        self.fatfs_remote_name = tk.StringVar(value="display_xxx")
+        ttk.Entry(row5, textvariable=self.fatfs_remote_name, width=32).pack(side='left', padx=5)
+        ttk.Button(row5, text="上传", command=self.on_fatfs_upload).pack(side='left', padx=5)
+        self.fatfs_upload_progress = ttk.Progressbar(row5, length=200, mode='determinate')
+        self.fatfs_upload_progress.pack(side='left', padx=5)
+        self.fatfs_upload_label = tk.StringVar(value="")
+        ttk.Label(row5, textvariable=self.fatfs_upload_label).pack(side='left')
+
+        # 内部缓存
+        self._fatfs_file_cache = []  # [(name, size, chunks), ...]
+
+    def on_fatfs_check(self):
+        if not self._check_conn():
+            return
+        status, err = self.proto.fatfs_check_formatted()
+        if err:
+            self.log(f"FATFS 检查失败: {err}")
+            self.fatfs_check_result.set(f"失败: {err}")
+        else:
+            if status == 0:
+                self.log("SPI Flash 已格式化 (FAT)")
+                self.fatfs_check_result.set("已格式化")
+            else:
+                self.log("SPI Flash 未格式化")
+                self.fatfs_check_result.set("未格式化")
+
+    def on_fatfs_format(self):
+        if not self._check_conn():
+            return
+        self.log("正在格式化 SPI Flash (FAT)...")
+        status, err = self.proto.fatfs_format()
+        if err:
+            self.log(f"格式化失败: {err}")
+        elif status == 0:
+            self.log("格式化成功")
+        else:
+            self.log(f"格式化失败, 状态码: {status}")
+
+    def on_fatfs_format_confirm(self):
+        if not self._check_conn():
+            return
+        import tkinter.messagebox as mb
+        if mb.askyesno("确认格式化",
+                        "将把 SPI Flash 格式化为 FAT 文件系统，所有数据将被清除。\n\n确认继续？"):
+            self.on_fatfs_format()
+
+    def on_fatfs_get_fs_info(self):
+        if not self._check_conn():
+            return
+        info, err = self.proto.fatfs_get_fs_info()
+        if err:
+            self.log(f"获取文件系统信息失败: {err}")
+            self.fatfs_fs_info.set(f"失败: {err}")
+        else:
+            total_mb = info['total'] / (1024 * 1024)
+            free_mb = info['free'] / (1024 * 1024)
+            used_mb = total_mb - free_mb
+            self.log(f"FATFS: 总容量 {total_mb:.2f}MB, 已用 {used_mb:.2f}MB, 空闲 {free_mb:.2f}MB")
+            self.fatfs_fs_info.set(f"总容量: {total_mb:.2f}MB | 已用: {used_mb:.2f}MB | 空闲: {free_mb:.2f}MB")
+
+    def on_fatfs_scan(self):
+        if not self._check_conn():
+            return
+        count, err = self.proto.fatfs_scan_files()
+        if err:
+            self.log(f"文件扫描失败: {err}")
+            self.fatfs_file_count.set(f"失败: {err}")
+            return
+
+        self.log(f"扫描到 {count} 个文件")
+        self.fatfs_file_count.set(f"{count} 个文件")
+
+        # 清空列表
+        for item in self.fatfs_tree.get_children():
+            self.fatfs_tree.delete(item)
+        self._fatfs_file_cache.clear()
+
+        # 获取每个文件的信息
+        for i in range(count):
+            info, err = self.proto.fatfs_get_file_info(i)
+            if err:
+                self.log(f"获取文件 {i} 信息失败: {err}")
+                continue
+            self._fatfs_file_cache.append(info)
+            self.fatfs_tree.insert('', 'end', values=(info['name'], info['size'], info['chunks']))
+
+    def _get_selected_fatfs_file(self):
+        sel = self.fatfs_tree.selection()
+        if not sel:
+            self.log("请先选择一个文件")
+            return None, None
+        idx = self.fatfs_tree.index(sel[0])
+        if idx >= len(self._fatfs_file_cache):
+            self.log("选中索引无效")
+            return None, None
+        return idx, self._fatfs_file_cache[idx]
+
+    def on_fatfs_read_selected(self):
+        if not self._check_conn():
+            return
+        idx, info = self._get_selected_fatfs_file()
+        if info is None:
+            return
+        total_chunks = info['chunks']
+        self.log(f"读取文件: {info['name']} ({info['size']} bytes, {total_chunks} chunks)")
+
+        buf = bytearray()
+        for ci in range(total_chunks):
+            chunk, err = self.proto.fatfs_read_file(idx, ci)
+            if err:
+                self.log(f"读取 chunk {ci} 失败: {err}")
+                return
+            buf.extend(chunk)
+
+        self.log(f"文件读取完成: {info['name']} ({len(buf)} bytes)")
+        # 显示前 2KB 内容
+        preview = min(2048, len(buf))
+        self.log(f"前 {preview} bytes:\n{hexdump(buf[:preview])}")
+
+    def on_fatfs_save_selected(self):
+        if not self._check_conn():
+            return
+        idx, info = self._get_selected_fatfs_file()
+        if info is None:
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension="",
+            initialfile=info['name'],
+            filetypes=[("All Files", "*.*")],
+            title="保存文件"
+        )
+        if not path:
+            return
+
+        total_chunks = info['chunks']
+        self.log(f"保存文件: {info['name']} → {path}")
+
+        buf = bytearray()
+        for ci in range(total_chunks):
+            chunk, err = self.proto.fatfs_read_file(idx, ci)
+            if err:
+                self.log(f"读取 chunk {ci} 失败: {err}")
+                return
+            buf.extend(chunk)
+
+        with open(path, 'wb') as f:
+            f.write(buf)
+        self.log(f"文件已保存: {path} ({len(buf)} bytes)")
+
+    def _on_fatfs_choose_file(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("All Files", "*.*")],
+            title="选择要上传的文件"
+        )
+        if path:
+            import os
+            fsize = os.path.getsize(path)
+            self.fatfs_upload_file.set(path)
+            self.log(f"已选择文件: {path} ({fsize} bytes)")
+
+    def on_fatfs_upload(self):
+        if not self._check_conn():
+            return
+        path = self.fatfs_upload_file.get()
+        if not path:
+            self.log("请先选择本地文件")
+            return
+        remote_name = self.fatfs_remote_name.get().strip()
+        if not remote_name:
+            self.log("请输入远程文件名")
+            return
+
+        with open(path, 'rb') as f:
+            file_data = f.read()
+
+        if len(file_data) == 0:
+            self.log("文件为空")
+            return
+
+        chunk_size = FATFS_WRITE_CHUNK
+        total_chunks = (len(file_data) + chunk_size - 1) // chunk_size
+
+        self.fatfs_upload_progress['value'] = 0
+        self.fatfs_upload_progress['maximum'] = 100
+        self.fatfs_upload_label.set("0%")
+
+        self.log(f"上传文件: {remote_name} ({len(file_data)} bytes)")
+        threading.Thread(target=self._fatfs_upload_thread,
+                         args=(remote_name, file_data, total_chunks),
+                         daemon=True).start()
+
+    def _fatfs_upload_thread(self, remote_name, file_data, _total_chunks):
+        chunk_size = FATFS_WRITE_CHUNK
+
+        # Step 1: 创建文件
+        self.root.after(0, self._fatfs_upload_update, 0, "创建文件...")
+        status, err = self.proto.fatfs_create_file(remote_name, len(file_data))
+        if err:
+            self.root.after(0, self._fatfs_upload_done, False, f"创建文件失败: {err}")
+            return
+        if status != 0:
+            self.root.after(0, self._fatfs_upload_done, False, f"创建文件失败, 状态码: {status}")
+            return
+        self.root.after(0, self.log, f"文件已创建: {remote_name}")
+
+        # Step 2: 重新扫描获取文件索引
+        self.root.after(0, self._fatfs_upload_update, 5, "扫描文件...")
+        count, err = self.proto.fatfs_scan_files()
+        if err:
+            self.root.after(0, self._fatfs_upload_done, False, f"扫描失败: {err}")
+            return
+
+        # 找到刚创建的文件索引
+        file_index = None
+        for i in range(count):
+            info, err = self.proto.fatfs_get_file_info(i)
+            if err:
+                continue
+            if info['name'] == remote_name:
+                file_index = i
+                break
+        if file_index is None:
+            self.root.after(0, self._fatfs_upload_done, False, f"找不到刚创建的文件: {remote_name}")
+            return
+
+        # Step 3: 分块写入
+        for offset in range(0, len(file_data), chunk_size):
+            n = min(chunk_size, len(file_data) - offset)
+            chunk = file_data[offset:offset + n]
+            status, err = self.proto.fatfs_write_file(file_index, offset, chunk)
+            if err:
+                self.root.after(0, self._fatfs_upload_done, False,
+                                f"写入失败 @ offset={offset}: {err}")
+                return
+            if status != 0:
+                self.root.after(0, self._fatfs_upload_done, False,
+                                f"写入失败 @ offset={offset}, 状态码: {status}")
+                return
+            pct = (offset + n) * 100 // len(file_data)
+            self.root.after(0, self._fatfs_upload_update, pct, None)
+
+        self.root.after(0, self._fatfs_upload_done, True, None)
+
+    def _fatfs_upload_update(self, pct, msg):
+        if pct is not None:
+            self.fatfs_upload_progress['value'] = pct
+        if msg:
+            self.fatfs_upload_label.set(msg)
+        else:
+            self.fatfs_upload_label.set(f"{pct}%")
+
+    def _fatfs_upload_done(self, _success, err):
+        if err:
+            self.log(f"FATFS 上传失败: {err}")
+            self.fatfs_upload_label.set("失败")
+            return
+        self.fatfs_upload_progress['value'] = 100
+        self.fatfs_upload_label.set("完成")
+        self.log("FATFS 文件上传成功")
+        # 自动刷新文件列表
+        self.on_fatfs_scan()
 
     def run(self):
         self.root.mainloop()

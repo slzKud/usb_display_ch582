@@ -73,7 +73,6 @@ uint8_t BSP_W25Qx_WriteEnable(void)
 
     /* Wait the end of Flash writing */
     while (BSP_W25Qx_GetStatus() == W25Qx_BUSY)
-        ;
     {
         /* Check for the Timeout */
         if ((SYS_GetSysTickCnt() - tickstart) > W25Qx_TIMEOUT_VALUE)
@@ -87,32 +86,15 @@ uint8_t BSP_W25Qx_WriteEnable(void)
 
 void BSP_W25Qx_Read_ID(uint8_t *ID)
 {
-    
-    uint8_t cmd[4] = {READ_ID_CMD, 0x00, 0x00, 0x00};
+
+    uint8_t cmd = READ_JEDEC_ID_CMD;
 
     W25Qx_Enable();
-    /* Send the read ID command */
-    SPI0_MasterTrans(cmd, 4);
-    /* Reception of the data */
-    SPI0_MasterRecv(ID, 2);
+    /* Send the JEDEC ID command */
+    SPI0_MasterTrans(&cmd, 1);
+    /* Reception of the data: Manufacturer, Memory Type, Capacity */
+    SPI0_MasterRecv(ID, 3);
     W25Qx_Disable();
-    /*
-    uint8_t ID1,ID2;
-    GPIOA_ResetBits(GPIO_Pin_12);
-    SPI0_MasterSendByte(0x90);
-    SPI0_MasterSendByte(0x00);
-    SPI0_MasterSendByte(0x00);
-    SPI0_MasterSendByte(0x00);
-    for(int i=0;i<5;i++){
-        printf("SPI0_MasterRecvByte()=%x\n",SPI0_MasterRecvByte());
-    }
-    ID1=SPI0_MasterRecvByte();
-    ID2=SPI0_MasterRecvByte();
-    printf("%x,%x\n",ID1,ID2);
-    GPIOA_SetBits(GPIO_Pin_12);
-    *(ID)=ID1;
-    *(ID+1)=ID2;
-    */
 }
 
 uint8_t BSP_W25Qx_Read(uint8_t *pData, uint32_t ReadAddr, uint32_t Size)
@@ -180,7 +162,6 @@ uint8_t BSP_W25Qx_Write(uint8_t *pData, uint32_t WriteAddr, uint32_t Size)
         W25Qx_Disable();
         /* Wait the end of Flash writing */
         while (BSP_W25Qx_GetStatus() == W25Qx_BUSY)
-            ;
         {
             /* Check for the Timeout */
             if ((SYS_GetSysTickCnt() - tickstart) > W25Qx_TIMEOUT_VALUE)
@@ -194,6 +175,27 @@ uint8_t BSP_W25Qx_Write(uint8_t *pData, uint32_t WriteAddr, uint32_t Size)
         pData += current_size;
         current_size = ((current_addr + W25Q128FV_PAGE_SIZE) > end_addr) ? (end_addr - current_addr) : W25Q128FV_PAGE_SIZE;
     } while (current_addr < end_addr);
+
+    return W25Qx_OK;
+}
+
+/* 非阻塞版本：仅发送页编程命令，不等待完成 */
+uint8_t BSP_W25Qx_Write_NB(uint8_t *pData, uint32_t WriteAddr, uint32_t Size)
+{
+    uint8_t cmd[4];
+
+    cmd[0] = PAGE_PROG_CMD;
+    cmd[1] = (uint8_t)(WriteAddr >> 16);
+    cmd[2] = (uint8_t)(WriteAddr >> 8);
+    cmd[3] = (uint8_t)(WriteAddr);
+
+    BSP_W25Qx_WriteEnable();
+
+    W25Qx_Enable();
+    SPI0_MasterTrans(cmd, 4);
+    DelayMs(1);
+    SPI0_MasterTrans(pData, Size);
+    W25Qx_Disable();
 
     return W25Qx_OK;
 }
@@ -212,14 +214,13 @@ uint8_t BSP_W25Qx_Erase_Block(uint32_t Address)
 
     /*Select the FLASH: Chip Select low */
     W25Qx_Enable();
-    /* Send the read ID command */
+    /* Send the sector erase command */
     SPI0_MasterTrans(cmd, 4);
     /*Deselect the FLASH: Chip Select high */
     W25Qx_Disable();
 
-    /* Wait the end of Flash writing */
+    /* Wait the end of Flash erasing */
     while (BSP_W25Qx_GetStatus() == W25Qx_BUSY)
-        ;
     {
         /* Check for the Timeout */
         if ((SYS_GetSysTickCnt() - tickstart) > W25Q128FV_SECTOR_ERASE_MAX_TIME)
@@ -227,6 +228,39 @@ uint8_t BSP_W25Qx_Erase_Block(uint32_t Address)
             return W25Qx_TIMEOUT;
         }
     }
+    return W25Qx_OK;
+}
+
+/* 非阻塞版本：仅发送擦除命令，不等待完成，由调用方通过 GET_STATUS 轮询 */
+uint8_t BSP_W25Qx_Erase_Block_NB(uint32_t Address)
+{
+    uint8_t cmd[4];
+    cmd[0] = SECTOR_ERASE_CMD;
+    cmd[1] = (uint8_t)(Address >> 16);
+    cmd[2] = (uint8_t)(Address >> 8);
+    cmd[3] = (uint8_t)(Address);
+
+    BSP_W25Qx_WriteEnable();
+
+    W25Qx_Enable();
+    SPI0_MasterTrans(cmd, 4);
+    W25Qx_Disable();
+
+    return W25Qx_OK;
+}
+
+/* 非阻塞版本：仅发送全片擦除命令，不等待完成 */
+uint8_t BSP_W25Qx_Erase_Chip_NB(void)
+{
+    uint8_t cmd[1];
+    cmd[0] = CHIP_ERASE_CMD;
+
+    BSP_W25Qx_WriteEnable();
+
+    W25Qx_Enable();
+    SPI0_MasterTrans(cmd, 1);
+    W25Qx_Disable();
+
     return W25Qx_OK;
 }
 
@@ -244,14 +278,13 @@ uint8_t BSP_W25Qx_Erase_Chip(void)
 
     /*Select the FLASH: Chip Select low */
     W25Qx_Enable();
-    /* Send the read ID command */
+    /* Send the chip erase command */
     SPI0_MasterTrans(cmd, 1);
     /*Deselect the FLASH: Chip Select high */
     W25Qx_Disable();
 
     /* Wait the end of Flash writing */
-    while (BSP_W25Qx_GetStatus() != W25Qx_BUSY)
-        ;
+    while (BSP_W25Qx_GetStatus() == W25Qx_BUSY)
     {
         /* Check for the Timeout */
         if ((SYS_GetSysTickCnt() - tickstart) > W25Q128FV_BULK_ERASE_MAX_TIME)
