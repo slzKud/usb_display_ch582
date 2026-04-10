@@ -142,20 +142,24 @@ DRESULT disk_write (
 		break;
 
 	case SPI_FLASH :
-		if(BSP_W25Qx_Erase_Block(sector*4096)==W25Qx_OK){
-			while(i<wc){
-				if(BSP_W25Qx_Write((uint8_t *)buff+(i*Q64_BLOCK_SIZE),sector*4096+i*Q64_BLOCK_SIZE,Q64_BLOCK_SIZE)==W25Qx_OK){
-					res=RES_OK;
-				}else{
+		{
+			int j;
+			res = RES_OK;
+			for(j = 0; j < count; j++){
+				if(BSP_W25Qx_Erase_Block((sector + j) * 4096) != W25Qx_OK){
+					res = RES_PARERR;
+					return res;
+				}
+			}
+			while(i < wc){
+				if(BSP_W25Qx_Write((uint8_t *)buff+(i*Q64_BLOCK_SIZE),sector*4096+i*Q64_BLOCK_SIZE,Q64_BLOCK_SIZE)!=W25Qx_OK){
 					printf("failed\n");
-					res=RES_PARERR;
+					res = RES_PARERR;
 				}
 				i++;
 			}
-		}else{
-			res=RES_PARERR;
+			return res;
 		}
-		return res;
 	}
 
 	return RES_PARERR;

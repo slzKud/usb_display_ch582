@@ -4,6 +4,7 @@
 #include "../variant/variant.h"
 
 extern struct Variant variant_slots[16];
+extern uint8_t Ready;
 
 #define SUCCESS 0
 #define FAILED 1
@@ -57,6 +58,16 @@ extern struct Variant variant_slots[16];
 #define MCU_OPT_GPIO_SUCCESS 0x0
 #define MCU_OPT_GPIO_FAILED 0x1
 #define MCU_OPT_GPIO_NUMBER_INVALID 0x2
+
+// GPIO映射表 - 将逻辑GPIO编号映射到实际CH58x引脚
+// 目前只有PB4，后续按需扩展
+typedef struct {
+    uint32_t pin_mask;    // GPIO_Pin_x 宏
+    uint8_t  port;        // 0=GPIOA, 1=GPIOB
+} gpio_mapping_t;
+
+#define GPIO_MAP_COUNT 1
+extern const gpio_mapping_t gpio_map[GPIO_MAP_COUNT];
 
 #define ERROR_RESP 0xFF
 

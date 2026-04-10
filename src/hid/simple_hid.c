@@ -14,8 +14,46 @@
 
 uint8_t *recv_data_buffer = NULL;
 
-uint8_t gpio_sim_level[2] = {0x0, 0x0};
-uint8_t gpio_sim_direction[2] = {0x0, 0x0};
+// GPIO映射表: 逻辑编号 -> 实际CH58x引脚
+// [0] = PB4
+const gpio_mapping_t gpio_map[GPIO_MAP_COUNT] = {
+    { GPIO_Pin_4, 1 },  // PB4
+};
+
+// 辅助函数: 根据映射表对引脚执行ModeCfg
+static void gpio_apply_direction(uint8_t gpio_number, uint8_t direction)
+{
+    const gpio_mapping_t *m = &gpio_map[gpio_number];
+    if (m->port == 0) {
+        GPIOA_ModeCfg(m->pin_mask, direction == MCU_GPIO_OUTPUT ? GPIO_ModeOut_PP_5mA : GPIO_ModeIN_Floating);
+    } else {
+        GPIOB_ModeCfg(m->pin_mask, direction == MCU_GPIO_OUTPUT ? GPIO_ModeOut_PP_5mA : GPIO_ModeIN_Floating);
+    }
+}
+
+// 辅助函数: 根据映射表对引脚执行Set/Reset
+static void gpio_apply_level(uint8_t gpio_number, uint8_t level)
+{
+    const gpio_mapping_t *m = &gpio_map[gpio_number];
+    if (m->port == 0) {
+        if (level == MCU_GPIO_HIGH) GPIOA_SetBits(m->pin_mask);
+        else GPIOA_ResetBits(m->pin_mask);
+    } else {
+        if (level == MCU_GPIO_HIGH) GPIOB_SetBits(m->pin_mask);
+        else GPIOB_ResetBits(m->pin_mask);
+    }
+}
+
+// 辅助函数: 根据映射表读取引脚电平
+static uint8_t gpio_read_level(uint8_t gpio_number)
+{
+    const gpio_mapping_t *m = &gpio_map[gpio_number];
+    if (m->port == 0) {
+        return GPIOA_ReadPortPin(m->pin_mask) ? MCU_GPIO_HIGH : MCU_GPIO_LOW;
+    } else {
+        return GPIOB_ReadPortPin(m->pin_mask) ? MCU_GPIO_HIGH : MCU_GPIO_LOW;
+    }
+}
 
 void print_hex(const char *label, const uint8_t *data, size_t length)
 {
@@ -228,11 +266,12 @@ int handle_port_info(uint8_t *data, uint8_t data_length, int port_number, uint8_
     uint8_t data_len = 0;
     if (query_port_number == 0)
     {
-        data_len = make_port_info_resp(0, 0, resp_data);
+        data_len = make_port_info_resp(0, Ready, resp_data);
     }
     else
     {
-        data_len = make_port_info_resp(1, 1, resp_data);
+        // Port1 (U2Ready) 已移除，写死未连接
+        data_len = make_port_info_resp(1, 0, resp_data);
     }
     *resp_data_length = data_len;
     return PARSE_STATUS_SUCCESS;
@@ -249,7 +288,7 @@ int handle_mcu_opt_gpio_level(uint8_t *data, uint8_t data_length, int port_numbe
     uint8_t data_len = 0;
     //printf("handle_mcu_opt_gpio_level:gpio_number:%d\n", gpio_number);
     //printf("handle_mcu_opt_gpio_level:gpio_rw_flag:%d\n", gpio_rw_flag);
-    if (gpio_number >= sizeof(gpio_sim_direction))
+    if (gpio_number >= GPIO_MAP_COUNT)
     {
         data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_NUMBER_INVALID, gpio_number, 0, resp_data);
         goto final;
@@ -264,13 +303,13 @@ int handle_mcu_opt_gpio_level(uint8_t *data, uint8_t data_length, int port_numbe
             data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_FAILED, gpio_number, gpio_level, resp_data);
             goto final;
         }
-        gpio_sim_level[gpio_number] = gpio_level;
+        gpio_apply_level(gpio_number, gpio_level);
     }
     else if (gpio_rw_flag == MCU_GPIO_READ)
     {
-        // todo
+        gpio_level = gpio_read_level(gpio_number);
     }
-    data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_SUCCESS, gpio_number, gpio_sim_level[gpio_number], resp_data);
+    data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_SUCCESS, gpio_number, gpio_level, resp_data);
 final:
     *resp_data_length = data_len;
     return PARSE_STATUS_SUCCESS;
@@ -282,7 +321,7 @@ int handle_mcu_opt_gpio_set_direction(uint8_t *data, uint8_t data_length, int po
     uint8_t gpio_number = *(data + 1);
     uint8_t gpio_direction = *(data + 2);
     uint8_t data_len = 0;
-    if (gpio_number >= sizeof(gpio_sim_direction))
+    if (gpio_number >= GPIO_MAP_COUNT)
     {
         data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_NUMBER_INVALID, gpio_number, 0, resp_data);
         goto final;
@@ -292,8 +331,8 @@ int handle_mcu_opt_gpio_set_direction(uint8_t *data, uint8_t data_length, int po
         data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_FAILED, gpio_number, gpio_direction, resp_data);
         goto final;
     }
-    gpio_sim_direction[gpio_number] = gpio_direction;
-    data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_SUCCESS, gpio_number, gpio_sim_direction[gpio_number], resp_data);
+    gpio_apply_direction(gpio_number, gpio_direction);
+    data_len = make_mcu_opt_gpio_resp(MCU_OPT_GPIO_SUCCESS, gpio_number, gpio_direction, resp_data);
 final:
     *resp_data_length = data_len;
     return PARSE_STATUS_SUCCESS;
@@ -1034,13 +1073,14 @@ int handle_mcu_opt_FATFS_COMMAND(uint8_t *data, uint8_t data_length, int port_nu
         memset(&mkfs_opt, 0, sizeof(mkfs_opt));
         mkfs_opt.fmt = FM_FAT | FM_SFD;
         mkfs_opt.n_fat = 1;
-        mkfs_opt.align = 4096;   // SPI FLASH扇区对齐
+        mkfs_opt.align = 1;   // SPI FLASH扇区对齐(单位:扇区, 1=4096字节)
 
         FRESULT fr = f_mkfs("1:", &mkfs_opt, mkfs_buf, 4096);
         free(mkfs_buf);
 
         if (fr != FR_OK) {
-            fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
+            uint8_t err_extra[1] = { (uint8_t)fr };
+            fatfs_make_resp(action, 0x01, err_extra, 1, resp_data, resp_data_length);
             return PARSE_STATUS_SUCCESS;
         }
 
