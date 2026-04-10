@@ -12,9 +12,9 @@ import hid
 # capacity_id 编码: 0x14=8Mbit, 0x15=16Mbit, 0x16=32Mbit, 0x17=64Mbit, 0x18=128Mbit, 0x19=256Mbit
 W25Q_CHIP_TABLE = {
     0xEF: {  # Winbond
-        0x16: ("W25Q64",   8 * 1024 * 1024),      # 8MB
+        0x16: ("W25Q32",   4 * 1024 * 1024),      # 4MB
         0x17: ("W25Q64",   8 * 1024 * 1024),      # 8MB
-        0x18: ("W25Q256", 32 * 1024 * 1024),      # 32MB
+        0x18: ("W25Q128", 16 * 1024 * 1024),      # 16MB
     },
 }
 
