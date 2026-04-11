@@ -342,23 +342,23 @@ class HIDProtocol:
             return None, err
         if payload[0] != 0:
             return None, f"状态: {STATUS_NAMES.get(payload[0], 'UNKNOWN')}"
-        # payload: [STATUS][ACTION][FILESIZE(4B)][TOTAL_CHUNKS(2B)][FILENAME\0]
+        # payload: [STATUS][ACTION][FILESIZE(4B)][TOTAL_CHUNKS(4B)][FILENAME\0]
         p = bytes(payload)
         fsize = struct.unpack_from('<I', p, 2)[0]
-        total_chunks = struct.unpack_from('<H', p, 6)[0]
-        fname = p[8:].split(b'\x00')[0].decode('ascii', errors='replace')
+        total_chunks = struct.unpack_from('<I', p, 6)[0]
+        fname = p[10:].split(b'\x00')[0].decode('ascii', errors='replace')
         return {"size": fsize, "chunks": total_chunks, "name": fname}, None
 
     def fatfs_read_file(self, file_index, chunk_index):
-        data = [MCU_OPT_FATFS, FATFS_READ_FILE, file_index] + list(struct.pack('<H', chunk_index))
+        data = [MCU_OPT_FATFS, FATFS_READ_FILE, file_index] + list(struct.pack('<I', chunk_index))
         resp_cmd, payload, err = self.send_recv(CMD_MCU_OPT, data)
         if err:
             return None, err
         if payload[0] != 0:
             return None, f"状态: {STATUS_NAMES.get(payload[0], 'UNKNOWN')}"
-        # payload: [STATUS][ACTION][CHUNK_INDEX(2B)][BYTES_READ(1B)][DATA...]
-        bytes_read = payload[4]
-        return bytes(payload[5:5 + bytes_read]), None
+        # payload: [STATUS][ACTION][CHUNK_INDEX(4B)][BYTES_READ(1B)][DATA...]
+        bytes_read = payload[6]
+        return bytes(payload[7:7 + bytes_read]), None
 
     def fatfs_create_file(self, filename, file_size):
         fname_bytes = filename.encode('ascii')
@@ -1482,6 +1482,10 @@ class HIDTesterGUI:
         row3.pack(fill='x', pady=5)
         ttk.Button(row3, text="读取选中文件", command=self.on_fatfs_read_selected).pack(side='left')
         ttk.Button(row3, text="保存选中文件", command=self.on_fatfs_save_selected).pack(side='left', padx=5)
+        self.fatfs_read_progress = ttk.Progressbar(row3, length=200, mode='determinate')
+        self.fatfs_read_progress.pack(side='left', padx=5)
+        self.fatfs_read_label = tk.StringVar(value="")
+        ttk.Label(row3, textvariable=self.fatfs_read_label).pack(side='left')
 
         # 写入新文件
         sep2 = ttk.Separator(tab, orient='horizontal')
@@ -1603,19 +1607,39 @@ class HIDTesterGUI:
             return
         total_chunks = info['chunks']
         self.log(f"读取文件: {info['name']} ({info['size']} bytes, {total_chunks} chunks)")
+        self.fatfs_read_progress['value'] = 0
+        self.fatfs_read_progress['maximum'] = 100
+        self.fatfs_read_label.set("0%")
+        threading.Thread(target=self._fatfs_read_thread, args=(idx, total_chunks), daemon=True).start()
 
+    def _fatfs_read_thread(self, file_index, total_chunks):
         buf = bytearray()
         for ci in range(total_chunks):
-            chunk, err = self.proto.fatfs_read_file(idx, ci)
+            chunk, err = self.proto.fatfs_read_file(file_index, ci)
             if err:
-                self.log(f"读取 chunk {ci} 失败: {err}")
+                self.root.after(0, self._fatfs_read_done, None, f"读取 chunk {ci} 失败: {err}")
                 return
             buf.extend(chunk)
+            if ci % 20 == 0 or ci == total_chunks - 1:
+                pct = (ci + 1) * 100 // total_chunks
+                self.root.after(0, self._fatfs_read_progress_update, pct)
+        self.root.after(0, self._fatfs_read_done, bytes(buf), None)
 
-        self.log(f"文件读取完成: {info['name']} ({len(buf)} bytes)")
-        # 显示前 2KB 内容
-        preview = min(2048, len(buf))
-        self.log(f"前 {preview} bytes:\n{hexdump(buf[:preview])}")
+    def _fatfs_read_progress_update(self, pct):
+        self.fatfs_read_progress['value'] = pct
+        self.fatfs_read_label.set(f"{pct}%")
+
+    def _fatfs_read_done(self, data, err):
+        if err:
+            self.log(f"FATFS {err}")
+            self.fatfs_read_label.set("失败")
+            return
+        self.fatfs_read_progress['value'] = 100
+        self.fatfs_read_label.set("完成")
+        self.log(f"文件读取完成 ({len(data)} bytes)")
+        preview = min(2048, len(data))
+        self.log(f"前 {preview} bytes:\n{hexdump(data[:preview])}")
+        self._fatfs_read_buf = data
 
     def on_fatfs_save_selected(self):
         if not self._check_conn():
@@ -1634,18 +1658,35 @@ class HIDTesterGUI:
 
         total_chunks = info['chunks']
         self.log(f"保存文件: {info['name']} → {path}")
+        self.fatfs_read_progress['value'] = 0
+        self.fatfs_read_progress['maximum'] = 100
+        self.fatfs_read_label.set("0%")
+        threading.Thread(target=self._fatfs_save_thread, args=(idx, total_chunks, path), daemon=True).start()
 
+    def _fatfs_save_thread(self, file_index, total_chunks, path):
         buf = bytearray()
         for ci in range(total_chunks):
-            chunk, err = self.proto.fatfs_read_file(idx, ci)
+            chunk, err = self.proto.fatfs_read_file(file_index, ci)
             if err:
-                self.log(f"读取 chunk {ci} 失败: {err}")
+                self.root.after(0, self._fatfs_save_done, False, f"读取 chunk {ci} 失败: {err}")
                 return
             buf.extend(chunk)
+            if ci % 20 == 0 or ci == total_chunks - 1:
+                pct = (ci + 1) * 100 // total_chunks
+                self.root.after(0, self._fatfs_read_progress_update, pct)
 
         with open(path, 'wb') as f:
             f.write(buf)
-        self.log(f"文件已保存: {path} ({len(buf)} bytes)")
+        self.root.after(0, self._fatfs_save_done, True, f"文件已保存: {path} ({len(buf)} bytes)")
+
+    def _fatfs_save_done(self, success, msg):
+        if success:
+            self.fatfs_read_progress['value'] = 100
+            self.fatfs_read_label.set("完成")
+            self.log(msg)
+        else:
+            self.log(f"FATFS {msg}")
+            self.fatfs_read_label.set("失败")
 
     def _on_fatfs_choose_file(self):
         path = filedialog.askopenfilename(

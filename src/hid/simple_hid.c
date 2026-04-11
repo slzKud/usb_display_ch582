@@ -7,6 +7,7 @@
 #include "simple_hid.h"
 #include "../w25qxx/w25qxx.h"
 #include "../variant/variant.h"
+#include "../ver.h"
 #ifdef ENABLE_FATFS
 #include "../fatfs/ff.h"
 #endif
@@ -250,7 +251,7 @@ uint8_t make_mcu_opt_gpio_resp(int status, int gpio_number, int gpio_direction, 
 }
 int handle_mcu_ver(uint8_t *data, uint8_t data_length, int port_number, uint8_t **resp_data, uint8_t *resp_data_length)
 {
-    uint8_t data_len = make_mcu_ver_resp(1, 2, resp_data);
+    uint8_t data_len = make_mcu_ver_resp(MAJOR_VER, MINOR_VER, resp_data);
     *resp_data_length = data_len;
     return PARSE_STATUS_SUCCESS;
 }
@@ -869,27 +870,28 @@ int handle_mcu_opt_FATFS_COMMAND(uint8_t *data, uint8_t data_length, int port_nu
             return PARSE_STATUS_SUCCESS;
         }
 
-        // extra: [FILESIZE(4B)][TOTAL_CHUNKS(2B)][FILENAME...\0]
+        // extra: [FILESIZE(4B)][TOTAL_CHUNKS(4B)][FILENAME...\0]
         uint32_t fsize = file_cache[file_index].size;
-        uint16_t total_chunks = (uint16_t)((fsize + FATFS_READ_CHUNK_SIZE - 1) / FATFS_READ_CHUNK_SIZE);
+        uint32_t total_chunks = (fsize + FATFS_READ_CHUNK_SIZE - 1) / FATFS_READ_CHUNK_SIZE;
         uint8_t name_len = (uint8_t)strlen(file_cache[file_index].name);
-        uint8_t extra[4 + 2 + FATFS_MAX_FILENAME + 1]; // max possible
+        uint8_t extra[4 + 4 + FATFS_MAX_FILENAME + 1]; // max possible
         write_le32(extra, fsize);
-        write_le16_local(extra + 4, total_chunks);
-        memcpy(extra + 6, file_cache[file_index].name, name_len + 1); // include \0
-        uint8_t extra_total = 6 + name_len + 1;
+        write_le32(extra + 4, total_chunks);
+        memcpy(extra + 8, file_cache[file_index].name, name_len + 1); // include \0
+        uint8_t extra_total = 8 + name_len + 1;
 
         fatfs_make_resp(action, 0x00, extra, extra_total, resp_data, resp_data_length);
         return PARSE_STATUS_SUCCESS;
     }
     else if (action == FATFS_ACTION_READ_FILE) // 0x04
     {
-        // data: [ACTION][FILE_INDEX(1B)][CHUNK_INDEX(2B LE16)]
-        if (data_length < 5)
+        // data: [ACTION][FILE_INDEX(1B)][CHUNK_INDEX(4B LE32)]
+        if (data_length < 7)
             return PARSE_STATUS_PACKET_DATA_LEN_INVALID;
 
         uint8_t file_index = data[2];
-        uint16_t chunk_index = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
+        uint32_t chunk_index = (uint32_t)data[3] | ((uint32_t)data[4] << 8) |
+                               ((uint32_t)data[5] << 16) | ((uint32_t)data[6] << 24);
 
         if (file_index >= file_count) {
             fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
@@ -907,7 +909,7 @@ int handle_mcu_opt_FATFS_COMMAND(uint8_t *data, uint8_t data_length, int port_nu
             return PARSE_STATUS_SUCCESS;
         }
 
-        uint32_t offset = (uint32_t)chunk_index * FATFS_READ_CHUNK_SIZE;
+        uint32_t offset = chunk_index * FATFS_READ_CHUNK_SIZE;
         if (offset >= f_size(&fp)) {
             f_close(&fp);
             fatfs_make_resp(action, 0x01, NULL, 0, resp_data, resp_data_length);
@@ -925,13 +927,13 @@ int handle_mcu_opt_FATFS_COMMAND(uint8_t *data, uint8_t data_length, int port_nu
             return PARSE_STATUS_SUCCESS;
         }
 
-        // extra: [CHUNK_INDEX(2B)][BYTES_READ(1B)][DATA...]
-        uint8_t extra[2 + 1 + FATFS_READ_CHUNK_SIZE];
-        write_le16_local(extra, chunk_index);
-        extra[2] = (uint8_t)bytes_read;
-        memcpy(extra + 3, read_buf, bytes_read);
+        // extra: [CHUNK_INDEX(4B LE32)][BYTES_READ(1B)][DATA...]
+        uint8_t extra[4 + 1 + FATFS_READ_CHUNK_SIZE];
+        write_le32(extra, chunk_index);
+        extra[4] = (uint8_t)bytes_read;
+        memcpy(extra + 5, read_buf, bytes_read);
 
-        fatfs_make_resp(action, 0x00, extra, 3 + bytes_read, resp_data, resp_data_length);
+        fatfs_make_resp(action, 0x00, extra, 5 + bytes_read, resp_data, resp_data_length);
         return PARSE_STATUS_SUCCESS;
     }
     else if (action == FATFS_ACTION_CREATE_FILE) // 0x05
