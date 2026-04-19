@@ -1,0 +1,254 @@
+// Microsoft Visual C++ generated resource script.
+//
+#include "resource.h"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#include "winres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+// Re-include resource.h so the RC compiler can see all defines
+#include "resource.h"
+
+/////////////////////////////////////////////////////////////////////////////
+// Chinese (Simplified, PRC) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_CHS)
+LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
+#pragma code_page(936)
+
+#ifdef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// TEXTINCLUDE
+//
+
+1 TEXTINCLUDE
+BEGIN
+    "resource.h\0"
+END
+
+2 TEXTINCLUDE
+BEGIN
+    "#include ""winres.h""\r\n"
+    "\0"
+END
+
+3 TEXTINCLUDE
+BEGIN
+    "\r\n"
+    "\0"
+END
+
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_OPTIONS_DIALOG DIALOGEX 0, 0, 370, 280
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "MonitorDemoHID Settings"
+FONT 9, "Microsoft YaHei", 400, 0, 0x0
+BEGIN
+    GROUPBOX        "USB HID Device", IDC_STATIC, 7, 7, 356, 38
+    LTEXT           "VID:", IDC_STATIC, 15, 22, 25, 10
+    EDITTEXT        IDC_VID_EDIT, 40, 20, 70, 14, ES_AUTOHSCROLL
+    LTEXT           "PID:", IDC_STATIC, 120, 22, 25, 10
+    EDITTEXT        IDC_PID_EDIT, 145, 20, 70, 14, ES_AUTOHSCROLL
+    LTEXT           "Status: Checking...", IDC_STATIC_STATUS, 225, 22, 130, 10
+    GROUPBOX        "Items", IDC_STATIC, 7, 48, 356, 195
+    CONTROL         "", IDC_MONITOR_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP, 12, 60, 346, 177
+    COMBOBOX        IDC_TYPE_COMBO, 0, 0, 50, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "OK", IDOK, 215, 263, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 283, 263, 50, 14
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO
+BEGIN
+    IDD_OPTIONS_DIALOG, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 363
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 273
+    END
+END
+#endif    // APSTUDIO_INVOKED
+//
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,1
+ PRODUCTVERSION 1,0,0,1
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x2L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "TrafficMonitor"
+            VALUE "FileDescription", "MonitorDemoHID Plugin for TrafficMonitor"
+            VALUE "FileVersion", "1.0.0.1"
+            VALUE "InternalName", "MonitorDemoHID.dll"
+            VALUE "LegalCopyright", "Copyright (C) 2026"
+            VALUE "OriginalFilename", "MonitorDemoHID.dll"
+            VALUE "ProductName", "MonitorDemoHID Plugin for TrafficMonitor"
+            VALUE "ProductVersion", "1.0.0.1"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// String Table
+//
+
+STRINGTABLE
+BEGIN
+    IDS_PLUGIN_NAME         "TrafficMonitor HID Sender"
+    IDS_PLUGIN_DESCRIPTION  "A USB HID sender plugin for TrafficMonitor."
+    IDS_ITEM_CPU            "CPU Usage"
+    IDS_ITEM_MEMORY         "Memory Usage"
+    IDS_ITEM_GPU_USAGE      "GPU Usage"
+    IDS_ITEM_HDD_USAGE      "HDD Usage"
+    IDS_ITEM_CPU_TEMP       "CPU Temp"
+    IDS_ITEM_GPU_TEMP       "GPU Temp"
+    IDS_ITEM_HDD_TEMP       "HDD Temp"
+    IDS_ITEM_MAIN_BOARD_TEMP "Mainboard Temp"
+    IDS_ITEM_CPU_FREQ       "CPU Frequency"
+    IDS_ITEM_UP_SPEED       "Upload Speed"
+    IDS_ITEM_DOWN_SPEED     "Download Speed"
+    IDS_ITEM_TODAY_UP       "Today Upload"
+    IDS_ITEM_TODAY_DOWN     "Today Download"
+END
+
+#endif    // Chinese resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United States) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+#pragma code_page(1252)
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Dialog
+//
+
+IDD_OPTIONS_DIALOG DIALOGEX 0, 0, 370, 280
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "MonitorDemoHID Settings"
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    GROUPBOX        "USB HID Device", IDC_STATIC, 7, 7, 356, 38
+    LTEXT           "VID:", IDC_STATIC, 15, 22, 25, 10
+    EDITTEXT        IDC_VID_EDIT, 40, 20, 70, 14, ES_AUTOHSCROLL
+    LTEXT           "PID:", IDC_STATIC, 120, 22, 25, 10
+    EDITTEXT        IDC_PID_EDIT, 145, 20, 70, 14, ES_AUTOHSCROLL
+    LTEXT           "Status: Checking...", IDC_STATIC_STATUS, 225, 22, 130, 10
+    GROUPBOX        "Items", IDC_STATIC, 7, 48, 356, 195
+    CONTROL         "", IDC_MONITOR_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP, 12, 60, 346, 177
+    COMBOBOX        IDC_TYPE_COMBO, 0, 0, 50, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "OK", IDOK, 215, 263, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 283, 263, 50, 14
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// DESIGNINFO
+//
+
+#ifdef APSTUDIO_INVOKED
+GUIDELINES DESIGNINFO
+BEGIN
+    IDD_OPTIONS_DIALOG, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 363
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 273
+    END
+END
+#endif    // APSTUDIO_INVOKED
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// AFX_DIALOG_LAYOUT
+//
+
+IDD_OPTIONS_DIALOG AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// String Table
+//
+
+STRINGTABLE
+BEGIN
+    IDS_PLUGIN_NAME         "TrafficMonitor HID Sender"
+    IDS_PLUGIN_DESCRIPTION  "A USB HID sender plugin for TrafficMonitor."
+    IDS_ITEM_CPU            "CPU Usage"
+    IDS_ITEM_MEMORY         "Memory Usage"
+    IDS_ITEM_GPU_USAGE      "GPU Usage"
+    IDS_ITEM_HDD_USAGE      "HDD Usage"
+    IDS_ITEM_CPU_TEMP       "CPU Temp"
+    IDS_ITEM_GPU_TEMP       "GPU Temp"
+    IDS_ITEM_HDD_TEMP       "HDD Temp"
+    IDS_ITEM_MAIN_BOARD_TEMP "Mainboard Temp"
+    IDS_ITEM_CPU_FREQ       "CPU Frequency"
+    IDS_ITEM_UP_SPEED       "Upload Speed"
+    IDS_ITEM_DOWN_SPEED     "Download Speed"
+    IDS_ITEM_TODAY_UP       "Today Upload"
+    IDS_ITEM_TODAY_DOWN     "Today Download"
+END
+
+#endif    // English resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
