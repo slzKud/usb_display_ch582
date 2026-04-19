@@ -645,6 +645,8 @@ int handle_mcu_opt_DATAFLASH_COMMAND(uint8_t *data, uint8_t data_length, int por
 }
 // Variant变量存储区，支持ID 0xF0~0xFF，共16个变量槽
 struct Variant variant_slots[16] = {0};
+volatile uint32_t last_variant_recv_time = 0;
+volatile uint8_t variant_data_valid = 0;
 
 int handle_mcu_opt_VAR_SET_COMMAND(uint8_t *data, uint8_t data_length, int port_number, uint8_t **resp_data, uint8_t *resp_data_length)
 {
@@ -724,6 +726,8 @@ int handle_mcu_opt_VAR_SET_COMMAND(uint8_t *data, uint8_t data_length, int port_
         }
 
         variant_slots[slot_index] = var;
+        last_variant_recv_time = g_millis;
+        variant_data_valid = 1;
 
         uint8_t *req = make_header();
         uint8_t *hdr = req + MAGIC_CODE_LENGTH;

@@ -5,6 +5,9 @@
 
 extern struct Variant variant_slots[16];
 extern uint8_t Ready;
+extern volatile uint32_t last_variant_recv_time;
+extern volatile uint8_t variant_data_valid;
+extern volatile uint32_t g_millis;
 
 #define SUCCESS 0
 #define FAILED 1

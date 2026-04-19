@@ -33,6 +33,7 @@ u8g2_t u8g2;
 uint8_t current_font_index = 0x0;
 uint32_t font_offset = 0x0;
 uint32_t max_size = 0x04cd;
+volatile uint32_t g_millis = 0;
 
 // 设备描述符
 const uint8_t MyDevDescr[] = {0x12,0x01,0x10,0x01,0x00,0x00,0x00,DevEP0SIZE,0x3d,0x41,0x07,0x21,0x00,0x00,0x01,0x02,0x00,0x01};
@@ -591,8 +592,15 @@ int main()
     uint8_t text_count = 0;
     //u8g2_SetFont(&u8g2, myfont2_lite);
     BOOL use_ext_font=FALSE;
+    uint8_t has_dynamic_text = 0;
     if(parse_packet_file_lite((void *)NULL,dataflash_read_cb, &fonts, &font_count, &texts, &text_count) != 0) {
         printf("Failed to initialize program, using internal.\n");
+    }
+    for (int i = 0; i < text_count; i++) {
+        if (texts[i].category >= 0x11 && texts[i].category <= 0x1F) {
+            has_dynamic_text = 1;
+            break;
+        }
     }
     if(font_count>0){
         if (u8g2_InitExternalFont(&u8g2, (void *)NULL, dataflash_read_cb)) {
@@ -612,39 +620,65 @@ int main()
     }else{
         u8g2_SetFont(&u8g2, u8g2_font_6x13_tf);
     }
+    // 初始化 SysTick 为 1ms 中断计数
+    SysTick->CNT = 0;
+    SysTick->CMP = GetSysClock() / 1000 - 1;
+    PFIC_EnableIRQ(SysTick_IRQn);
+    SysTick->CTLR = SysTick_CTLR_INIT | SysTick_CTLR_STRE | SysTick_CTLR_STCLK | SysTick_CTLR_STIE | SysTick_CTLR_STE;
     while(1){
-        /*
-        u8g2_DrawUTF8(&u8g2, 5, 28, use_ext_font?"你好":"Hello, u8g2!");
-        u8g2_SendBuffer(&u8g2);
-        DelayMs(1000);
-        */
+        uint8_t show_waiting = 0;
+        if (text_count > 0 && use_ext_font && has_dynamic_text) {
+            uint32_t current_time = g_millis;
+            if (!variant_data_valid || (current_time - last_variant_recv_time) > 5000) {
+                show_waiting = 1;
+            }
+        }
         u8g2_FirstPage(&u8g2);
         do
         {
         if(text_count>0 && use_ext_font){
-            for (int i = 0; i < text_count; i++) {
-            if(text_count>0 && texts[i].style_font != current_font_index){
-                font_offset=fonts[(texts[i].style_font & 0xF)-1].offset+7;
-                max_size = font_offset+fonts[(texts[i].style_font & 0xF)-1].count;
-                current_font_index=(texts[i].style_font & 0xF);
-                u8g2_SetExternalFont(&u8g2, font_offset);
-                printf("current_font_index=%x,font_offset=%x,max_size=%x\n",current_font_index,font_offset,max_size);
-            }
-            if (texts[i].category >= 0x11 && texts[i].category <= 0x1F) {
-                uint8_t slot = texts[i].category - 0x11;
-                char fmt_buf[128];
-                format_dynamic_text(texts[i].text, &variant_slots[slot], fmt_buf, sizeof(fmt_buf));
-                u8g2_DrawUTF8(&u8g2, texts[i].x, texts[i].y, fmt_buf);
+            if (show_waiting) {
+                u8g2_DrawUTF8(&u8g2, 2, 28, "Waiting...");
             } else {
-                u8g2_DrawUTF8(&u8g2, texts[i].x, texts[i].y, texts[i].text);
-            }
+                for (int i = 0; i < text_count; i++) {
+                    if(texts[i].style_font != current_font_index){
+                        font_offset=fonts[(texts[i].style_font & 0xF)-1].offset+7;
+                        max_size = font_offset+fonts[(texts[i].style_font & 0xF)-1].count;
+                        current_font_index=(texts[i].style_font & 0xF);
+                        u8g2_SetExternalFont(&u8g2, font_offset);
+                        printf("current_font_index=%x,font_offset=%x,max_size=%x\n",current_font_index,font_offset,max_size);
+                    }
+                    if (texts[i].category >= 0x11 && texts[i].category <= 0x1F) {
+                        uint8_t slot = texts[i].category - 0x11;
+                        char fmt_buf[128];
+                        format_dynamic_text(texts[i].text, &variant_slots[slot], fmt_buf, sizeof(fmt_buf));
+                        u8g2_DrawUTF8(&u8g2, texts[i].x, texts[i].y, fmt_buf);
+                    } else {
+                        u8g2_DrawUTF8(&u8g2, texts[i].x, texts[i].y, texts[i].text);
+                    }
+                }
             }
         }else{
-            u8g2_DrawUTF8(&u8g2, 2, 28, "Example Program");
+            u8g2_DrawUTF8(&u8g2, 2, 20, "No Program");
+            u8g2_DrawUTF8(&u8g2, 2, 36, "Use tool to write.");
         }
         } while (u8g2_NextPage(&u8g2));
     }
 
+}
+
+/*********************************************************************
+ * @fn      SysTick_Handler
+ *
+ * @brief   SysTick中断处理，1ms递增全局毫秒计数器
+ *
+ * @return  none
+ */
+__attribute__((interrupt("WCH-Interrupt-fast")))
+void SysTick_Handler(void)
+{
+    SysTick->SR = 0;
+    g_millis++;
 }
 
 /*********************************************************************
