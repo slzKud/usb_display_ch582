@@ -554,7 +554,7 @@ int main()
     GPIOB_ModeCfg(GPIO_Pin_1, GPIO_ModeOut_PP_5mA);
     GPIOB_SetBits(GPIO_Pin_1);
     DelayMs(100);
-    GPIOPinRemap(ENABLE,RB_PIN_I2C);
+    //GPIOPinRemap(ENABLE,RB_PIN_I2C);
     IIC_Init();            //端口初始化
     CH58X_SPI_INIT_W25Qx(); //先初始化SPI EEPROM
     

@@ -69,7 +69,7 @@ typedef struct {
     uint8_t  port;        // 0=GPIOA, 1=GPIOB
 } gpio_mapping_t;
 
-#define GPIO_MAP_COUNT 1
+#define GPIO_MAP_COUNT 2
 extern const gpio_mapping_t gpio_map[GPIO_MAP_COUNT];
 
 #define ERROR_RESP 0xFF

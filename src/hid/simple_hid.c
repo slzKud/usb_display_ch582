@@ -19,6 +19,7 @@ uint8_t *recv_data_buffer = NULL;
 // [0] = PB4
 const gpio_mapping_t gpio_map[GPIO_MAP_COUNT] = {
     { GPIO_Pin_4, 1 },  // PB4
+    { GPIO_Pin_5, 0 },  // PA5
 };
 
 // 辅助函数: 根据映射表对引脚执行ModeCfg
